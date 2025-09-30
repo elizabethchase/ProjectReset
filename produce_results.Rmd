@@ -1,0 +1,2653 @@
+---
+title: "Results for Paper 1"
+author: "Elizabeth Chase"
+date: "2025-08-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(tidyverse)
+library(survival)
+library(tableone)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+library(pammtools)
+library(labelled)
+library(latex2exp)
+library(gbm)
+library(timeROC)
+library(viridis)
+library(mice)
+
+source("R:/research/code/useful_local_functions.R")
+
+#setting filepath for results:
+output_file <- 'R:/research/code/ElizabethFiles/Paper1_Revision_Results/'
+
+#setting list of states:
+states <- c("NC", "OK", "FL", "TX", "MN", "AZ", "WI")
+
+#setting filenames for datasets to read in:
+state_subset_rds_template = 'R:/research/data/crim_hist_sample_%s.rds'
+state_rds_template = 'R:/research/data/crim_hist_%s.rds'
+```
+
+## Supplemental Table 1: Lag Between Conviction and Incarceration
+
+```{r, echo = FALSE}
+#load data with single conviction record per individual, from all 7 states:
+load('R:/research/data/all_states_sample.RData')
+
+#calculate lag between conviction date and incarceration entry date:
+state_dat$inc_lag_time <- difftime(state_dat$inc_entry_dt, state_dat$adj_disp_dt, units = "days")
+
+#calculate descriptives:
+inc_table <- filter(state_dat, !is.na(inc_lag_time)) %>%
+  mutate(pretty_inc = case_when(inc_lag_time==0 ~ "Same day",
+                                inc_lag_time > 0 & inc_lag_time <= 7 ~ "1-7 days",
+                                inc_lag_time > 7 & inc_lag_time <= 14 ~ "8-14 days",
+                                inc_lag_time > 14 & inc_lag_time <= 31 ~ "15-31 days",
+                                inc_lag_time > 31 & inc_lag_time <= 90 ~ "32-90 days",
+                                inc_lag_time > 90 & inc_lag_time <= 180 ~ "3-6 months",
+                                inc_lag_time > 180 & inc_lag_time <= 365 ~ "6-12 months",
+                                inc_lag_time > 365 ~ "1+ years")) %>%
+  select(state, pretty_inc) %>%
+  group_by(state, pretty_inc) %>%
+  summarize(n = n()) %>%
+  group_by(state) %>%
+  mutate(denom = sum(n)) %>%
+  ungroup()
+
+#formatting:
+inc_table$howcommon <- paste0(round((inc_table$n/inc_table$denom)*100, digits = 1), "%")
+
+inc_table$pretty_inc <- factor(inc_table$pretty_inc, levels = c("Same day", "1-7 days", "8-14 days", "15-31 days", "32-90 days", "3-6 months", "6-12 months", "1+ years"), ordered = TRUE)
+
+inc_table <- select(inc_table, state, pretty_inc, howcommon, denom, n)
+
+inc_table2 <- select(inc_table, state, pretty_inc, howcommon) %>% pivot_wider(names_from = state, values_from = howcommon) %>% arrange(pretty_inc)
+
+kable(inc_table2, col.names = c("Conviction to Incarceration Time", "AZ", "FL", "MN", "NC", "OK", "TX", "WI"))
+
+write_csv(inc_table, paste0(output_file, "stable1_conv_inc_lags.csv"))
+```
+
+## Supplemental Table 2: Number of Convictions Grouped Per Episode
+
+```{r, echo = FALSE}
+#load data with single conviction record per individual, from all 7 states:
+load('R:/research/data/all_states_sample.RData')
+
+#calculate how many convictions are grouped in a single criminal episode:
+conv_group_table <- state_dat %>%
+  mutate(num_conv = case_when(events_on_date < 6 ~ as.character(events_on_date),
+                                events_on_date >= 6 ~ "6+")) %>%
+  select(state, num_conv) %>%
+  group_by(state, num_conv) %>%
+  summarize(n = n()) %>%
+  group_by(state) %>%
+  mutate(denom = sum(n)) %>%
+  ungroup()
+
+#formatting:
+conv_group_table$howcommon <- paste0(round((conv_group_table$n/conv_group_table$denom)*100, digits = 1), "%")
+
+conv_group_table <- select(conv_group_table, state, num_conv, howcommon, denom, n)
+
+inc_table2 <- select(conv_group_table, state, num_conv, howcommon) %>% pivot_wider(names_from = state, values_from = howcommon) %>% arrange(num_conv)
+
+kable(inc_table2, col.names = c("Number of Convictions Per Episode", "AZ", "FL", "MN", "NC", "OK", "TX", "WI"))
+
+write_csv(conv_group_table, paste0(output_file, "stable2_grouped_convs.csv"))
+```
+
+## Supplemental Table 3: Number of Incarcerations Grouped Per Episode
+
+```{r, echo = FALSE}
+#load data with single conviction record per individual, from all 7 states:
+load('R:/research/data/all_states_sample.RData')
+
+#calculate how many incarcerations are grouped in a single criminal episode:
+conv_group_table <- filter(state_dat, num_incs > 0) %>%
+  mutate(num_conv = case_when(num_incs < 4 ~ as.character(num_incs),
+                                num_incs >= 4 ~ "4+")) %>%
+  select(state, num_conv) %>%
+  group_by(state, num_conv) %>%
+  summarize(n = n()) %>%
+  group_by(state) %>%
+  mutate(denom = sum(n)) %>%
+  ungroup()
+
+#formatting:
+conv_group_table$howcommon <- paste0(round((conv_group_table$n/conv_group_table$denom)*100, digits = 1), "%")
+
+conv_group_table <- select(conv_group_table, state, num_conv, howcommon, denom, n)
+
+inc_table2 <- select(conv_group_table, state, num_conv, howcommon) %>% pivot_wider(names_from = state, values_from = howcommon) %>% arrange(num_conv)
+
+kable(inc_table2, col.names = c("Number of Incarcerations Per Episode", "AZ", "FL", "MN", "NC", "OK", "TX", "WI"))
+
+write_csv(conv_group_table, paste0(output_file, "stable3_grouped_incs.csv"))
+```
+
+## Supplemental Figure 1: Number of Offenses Per Individual
+
+```{r, echo = FALSE}
+#creating object to store results:
+freq_dat <- data.frame("state" = NA, "cjars_id" = NA, "num_offenses" = NA)
+
+#looping over states:
+for (i in states){
+  #read full state dataset (multiple convictions per individual)
+  my_rds2 = sprintf(state_rds_template, i)
+  
+  load(my_rds2)
+  
+  #calculate how many individuals had each number of convictions over lifetime:
+  newrows <- group_by(crim_hist_final, cjars_id) %>% summarize(num_offenses = n()) %>% mutate(state = i)
+  
+  freq_dat <- bind_rows(freq_dat, newrows)
+}
+
+freq_dat <- freq_dat[-1,]
+
+#truncating at 15 for CJARS privacy requirements + plot readability:
+freq_dat$num_offenses[freq_dat$num_offenses >= 15] <- 15
+
+plot_dat <- group_by(freq_dat, state, num_offenses) %>% summarize(n = n())
+
+write_csv(plot_dat, paste0(output_file, "sfigure1_num_offenses.csv"))
+
+ggplot(plot_dat) + geom_histogram(aes(x = num_offenses, y = n, fill = state), stat = "identity") + facet_wrap(~state, nrow = 3, scales = "free_y") + theme_bw() + xlab("Number of Criminal Episodes Per Individual") + ylab("Number of Individuals") + scale_fill_manual(values = viridis(7)) + theme(legend.position = "none") + scale_x_continuous(breaks = seq(0, 15, by = 5), labels = c("0", "5", "10", "15+"))
+```
+
+## Supplemental Figure 2: Effect of Sampling Approach on Estimated Recidivism Rate
+
+```{r, echo = FALSE, results = "asis", fig.height = 6, fig.width = 7, eval = FALSE}
+#creating object to store results:
+mydat <- NULL
+
+#looping over states
+for (i in states){
+  
+  #setting follow-up period for each state:
+  if (i=="NC"){
+  years <- c(2012:2019)
+} else if (i=="OK"){
+  years <- c(2001:2016)
+} else if (i=="MN"){
+  years <- c(2010:2020)
+} else if (i=="WI"){
+  years <- c(2001:2018)
+} else if (i=="AZ"){
+  years <- c(1998:2019)
+} else if (i=="FL"){
+  years <- c(2006:2020)
+} else if (i=="TX"){
+  years <- c(1993:2011)
+}
+  #load full dataset for state i (including multiple convictions per individual):
+  my_rds2 = sprintf(state_rds_template, i)
+  
+  load(my_rds2)
+  
+  #creating object to store results
+  fulldat <- NULL
+
+  #looping over years
+  for (j in years){
+    #select the first of the year as the date:
+    sel_date <- as.Date(paste0(j, "-01-01"))
+  
+    #pull conviction corresponding to the last conviction prior to the selected date where the individual is now free in society:
+    crim_hist_sample2 <- filter(crim_hist_final, adj_disp_dt <= sel_date, (is.na(inc_exit_dt) | inc_exit_dt <= sel_date)) %>%
+    group_by(cjars_id) %>%
+    arrange(adj_disp_dt) %>% 
+    slice_tail()
+
+  crim_hist_sample2 <- ungroup(crim_hist_sample2) %>%
+    mutate(compdate = if_else(is.na(inc_exit_dt), adj_disp_dt, inc_exit_dt))
+
+  #calculate length of time from the selected date to the date of conviction or release from prison:
+  crim_hist_sample2$offtime <- difftime(time1 = sel_date, time2 = crim_hist_sample2$compdate, units = "days")/365.25
+  
+  #calculate time free in society post-conviction or release from prison:
+  crim_hist_sample2$time_in_society <- crim_hist_sample2$ytime - (crim_hist_sample2$inc_time_months/12)
+  
+  #adjust by the length of time from the selected date:
+  crim_hist_sample2$ytime_mod <- crim_hist_sample2$time_in_society - crim_hist_sample2$offtime 
+
+  crim_hist_sample2 <- filter(crim_hist_sample2, ytime_mod >= 0)
+
+  #stack on top of data for other years:
+  fulldat <- rbind(fulldat, crim_hist_sample2)
+  }
+
+  #calculate time free in society for the original dataset (not stacked across years):
+  crim_hist_final$time_in_society <- crim_hist_final$ytime-(crim_hist_final$inc_time_months/12)
+
+  #We estimate the survival using all offenses:
+  allcases <- survfit(Surv(time_in_society, as.numeric(observed==1))~1, data = crim_hist_final)
+
+  mycurve <- summary(allcases, times = seq(0, 10, by = 0.1))
+
+  mydat <- rbind(mydat, data.frame("time" = mycurve$time, "survival" = mycurve$surv, "lower" = mycurve$lower, "upper" = mycurve$upper, "approach" = "All Cases", "State" = i, "n" = nrow(crim_hist_final)))
+
+  #We sample proportional to number of offenses and estimate the survival:
+  subset <- group_by(crim_hist_final, cjars_id) %>%
+  slice_sample()
+
+  randsamp <- survfit(Surv(time_in_society, as.numeric(observed==1))~1, data = subset)
+
+  mycurve <- summary(randsamp, times = seq(0, 10, by = 0.1))
+
+  mydat <- bind_rows(mydat, data.frame("time" = mycurve$time, "survival" = mycurve$surv, "lower" = mycurve$lower, "upper" = mycurve$upper, "approach" = "Sample Proportional to # Records", "State" = i, "n" = nrow(subset)))
+
+  rm(list = c("crim_hist_final", "subset", "allcases", "randsamp"))
+  
+  #We switch to our sample that sampled proportional to time free in society and estimate the survival:
+  my_rds = sprintf(state_subset_rds_template, i)
+  load(my_rds)
+  
+  randsamp <- survfit(Surv(time_in_society, as.numeric(observed==1))~1, data = crim_hist_sample)
+
+  mycurve <- summary(randsamp, times = seq(0, 10, by = 0.1))
+
+  mydat <- bind_rows(mydat, data.frame("time" = mycurve$time, "survival" = mycurve$surv, "lower" = mycurve$lower, "upper" = mycurve$upper, "approach" = "Sample Proportional to Time Free", "State" = i, "n" = nrow(crim_hist_sample)))
+  
+  #Reviewer approach which uses the stacked dataset and measures from the selected date:
+  randsamp <- survfit(Surv(ytime_mod, as.numeric(observed==1))~1, data = fulldat)
+
+  mycurve <- summary(randsamp, times = seq(0, 10, by = 0.1))
+
+  mydat <- bind_rows(mydat, data.frame("time" = mycurve$time, "survival" = mycurve$surv, "lower" = mycurve$lower, "upper" = mycurve$upper, "approach" = "Reviewer Req", "State" = i, "n" = nrow(crim_hist_sample)))
+  
+  
+}
+
+write_csv(mydat, paste0(output_file, "sfigure2_km_sampling.csv"))
+```
+
+```{r, echo = FALSE, results = "asis", fig.height = 6, fig.width = 7}
+mydat <- read_csv(paste0(output_file, "sfigure2_km_sampling.csv"))
+
+myplot <- ggplot(data = mydat) + geom_step(aes(x = time, y = survival*100, color = approach, linetype = approach), size = 1.2) + geom_stepribbon(aes(x = time, ymin = lower*100, ymax = upper*100, fill = approach), alpha = 0.2) + facet_wrap(~State, nrow = 3) + theme_bw() + xlab("Time (years)") + ylab("Percent Not Re-offending") + scale_x_continuous(breaks = c(0:10)) + theme(legend.position = "bottom", legend.title = element_blank()) + coord_cartesian(ylim = c(0, 100)) + scale_color_manual(values = viridis(4)) + scale_fill_manual(values = viridis(4)) + theme(text = element_text(size = 12)) + guides(color = guide_legend(nrow = 2, byrow = TRUE), fill = guide_legend(nrow=2,byrow=TRUE))
+
+myplot
+```
+
+## Table 1: Descriptive statistics on final sample
+
+```{r, echo = FALSE, warning=FALSE,message=FALSE,error=FALSE,results='hide'}
+#load data with single conviction record per individual, from all 7 states:
+load('R:/research/data/all_states_sample.RData')
+
+#loads of formatting:
+prettydatfortable <- state_dat
+
+prettydatfortable$adj_disp_dt_f = case_when(
+    prettydatfortable$adj_disp_dt < as.Date("2011-01-01") ~ "Pre-2011",
+    prettydatfortable$adj_disp_dt >= as.Date("2011-01-01") & prettydatfortable$adj_disp_dt < as.Date("2015-01-01") ~ "2011-2014",
+    prettydatfortable$adj_disp_dt >= as.Date("2015-01-01") & prettydatfortable$adj_disp_dt < as.Date("2019-01-01") ~ "2015-2018",
+    prettydatfortable$adj_disp_dt >= as.Date("2019-01-01") ~ "2019-2020"
+  )
+
+prettydatfortable$adj_disp_dt_f <- factor(prettydatfortable$adj_disp_dt_f, levels = c("Pre-2011", "2011-2014", "2015-2018", "2019-2020"), ordered = TRUE)
+
+prettydatfortable$n_felony_f = ifelse(prettydatfortable$n_felony >= 5, "5+", as.character(prettydatfortable$n_felony))
+
+prettydatfortable$n_misd_f = ifelse(prettydatfortable$n_misd >= 5, "5+", as.character(prettydatfortable$n_misd))
+
+prettydatfortable$n_prior_felony_f = ifelse(prettydatfortable$n_prior_felony >= 5, "5+", as.character(prettydatfortable$n_prior_felony))
+
+prettydatfortable$n_prior_misd_f = ifelse(prettydatfortable$n_prior_misd >= 5, "5+", as.character(prettydatfortable$n_prior_misd))
+
+prettydatfortable$dui = ifelse(prettydatfortable$agg_date_dui > 0, 1, 0)
+
+prettydatfortable$property = ifelse(prettydatfortable$agg_date_property > 0, 1, 0)
+
+prettydatfortable$drug = ifelse(prettydatfortable$agg_date_drug > 0, 1, 0)
+
+prettydatfortable$crim_traff = ifelse(prettydatfortable$agg_date_criminal_traffic > 0, 1, 0)
+
+prettydatfortable$violent = ifelse(prettydatfortable$agg_date_violent > 0, 1, 0)
+    
+prettydatfortable$public_order = ifelse(prettydatfortable$agg_date_public_order > 0, 1, 0)
+
+prettydatfortable$unknown = ifelse(prettydatfortable$agg_date_unknown > 0, 1, 0)
+
+prettydatfortable$prior_dui = ifelse(prettydatfortable$agg_prior_dui > 0, 1, 0)
+
+prettydatfortable$prior_property = ifelse(prettydatfortable$agg_prior_property > 0, 1, 0)
+
+prettydatfortable$prior_drug = ifelse(prettydatfortable$agg_prior_drug > 0, 1, 0)
+    
+prettydatfortable$prior_crim_traff = ifelse(prettydatfortable$agg_prior_criminal_traffic > 0, 1, 0)
+    
+prettydatfortable$prior_violent = ifelse(prettydatfortable$agg_prior_violent > 0, 1, 0)
+  
+prettydatfortable$prior_public_order = ifelse(prettydatfortable$agg_prior_public_order > 0, 1, 0)
+
+prettydatfortable$cohort = case_when(
+      is.na(prettydatfortable$dob) ~ NA_character_,
+      prettydatfortable$dob < as.Date("1950-01-01") ~ "Pre-1950",
+      prettydatfortable$dob >= as.Date("1950-01-01") & prettydatfortable$dob < as.Date("1960-01-01") ~ "1950s",
+       prettydatfortable$dob >= as.Date("1960-01-01") & prettydatfortable$dob < as.Date("1970-01-01") ~ "1960s",
+       prettydatfortable$dob >= as.Date("1970-01-01") & prettydatfortable$dob < as.Date("1980-01-01") ~ "1970s",
+       prettydatfortable$dob >= as.Date("1980-01-01") & prettydatfortable$dob < as.Date("1990-01-01") ~ "1980s",
+       prettydatfortable$dob >= as.Date("1990-01-01") & prettydatfortable$dob < as.Date("2000-01-01") ~ "1990s",
+       prettydatfortable$dob >= as.Date("2000-01-01") & prettydatfortable$dob < as.Date("2010-01-01") ~ "2000s")
+
+prettydatfortable$cohort <- factor(prettydatfortable$cohort, levels = c("Pre-1950s", "1950s", "1960s", "1970s", "1980s", "1990s", "2000s"), ordered = TRUE)
+
+prettydatfortable$age_at_date <- as.numeric(prettydatfortable$age_at_date)
+
+prettydatfortable$prison_spells_prior_f <- ifelse(prettydatfortable$prison_spells_prior >= 5, "5+", as.character(prettydatfortable$prison_spells_prior))
+
+prettydatfortable$sex_f <- factor(prettydatfortable$sex, levels = c(1, 2), labels = c("Male", "Female"))
+
+prettydatfortable$race_f <- factor(prettydatfortable$race, levels = c(1:6), labels = c("Non-Hispanic White", "Non-Hispanic Black", "Asian/Pacific Islander", "Hispanic", "American Indian/Alaskan Native", "Other race"))
+
+var_label(prettydatfortable$adj_disp_dt_f) <- "Conviction Date"
+var_label(prettydatfortable$n_felony_f) <- "Felony Counts"
+var_label(prettydatfortable$n_misd_f) <- "Misdemeanor Counts"
+var_label(prettydatfortable$n_prior_felony_f) <- "Prior Felony Counts"
+var_label(prettydatfortable$n_prior_misd_f) <- "Prior Misdemeanor Counts"
+var_label(prettydatfortable$age_at_date) <- "Age at Conviction"
+var_label(prettydatfortable$firstconv_age) <- "Age at First Conviction"
+var_label(prettydatfortable$property) <- "Property Offense"
+var_label(prettydatfortable$drug) <- "Drug Offense"
+var_label(prettydatfortable$crim_traff) <- "CriminalTraffic Offense"
+var_label(prettydatfortable$violent) <- "Violent Offense"
+var_label(prettydatfortable$public_order) <- "Public Order Offense"
+var_label(prettydatfortable$unknown) <- "Unknown Offense"
+var_label(prettydatfortable$dui) <- "DUI Offense"
+var_label(prettydatfortable$prior_property) <- "Has Prior Property Offense"
+var_label(prettydatfortable$prior_drug) <- "Has Prior Drug Offense"
+var_label(prettydatfortable$prior_crim_traff) <- "Has Prior CriminalTraffic Offense"
+var_label(prettydatfortable$prior_violent) <- "Has Prior Violent Offense"
+var_label(prettydatfortable$prior_public_order) <- "Has Prior Public Order Offense"
+var_label(prettydatfortable$prior_dui) <- "Has Prior DUI Offense"
+var_label(prettydatfortable$sex_f) <- "Sex"
+var_label(prettydatfortable$race_f) <- "Race"
+var_label(prettydatfortable$cohort) <- "Birth Year"
+var_label(prettydatfortable$observed) <- "Outcome"
+var_label(prettydatfortable$from_prison) <- "Incarcerated for Offense"
+var_label(prettydatfortable$prison_spells_prior_f) <- "Number of Prior Prison Spells"
+
+prettydatfortable$reoffense <- factor(as.numeric(prettydatfortable$observed==1), levels = c(0,1), labels = c("No Reoffense", "Reoffense"), ordered = TRUE)
+var_label(prettydatfortable$reoffense) <- "Outcome"
+
+mytable2 <- CreateTableOne(vars = c("adj_disp_dt_f", "n_felony_f", "n_misd_f", "n_prior_felony_f", "n_prior_misd_f", "age_at_date", "firstconv_age", "dui", "property", "drug", "crim_traff", "violent", "public_order", "unknown", "prior_dui", "prior_property", "prior_drug", "prior_crim_traff", "prior_violent", "prior_public_order", "sex_f", "race_f", "cohort", "from_prison", "prison_spells_prior_f", "reoffense"),
+                          strata = "state",
+                          data = prettydatfortable,
+                          factorVars = c("adj_disp_dt_f", "n_felony_f", "n_misd_f", "n_prior_felony_f", "n_prior_misd_f", "dui", "property", "drug", "crim_traff", "violent", "public_order", "unknown", "prior_dui", "prior_property", "prior_drug", "prior_crim_traff", "prior_violent", "prior_public_order", "cohort", "from_prison", "prison_spells_prior_f", "reoffense"),
+                          includeNA = FALSE,
+                          test = FALSE)
+
+test2 <- print(mytable2, varLabels = TRUE, nonnormal = c("age_at_date", "firstconv_age"))
+test <- as.data.frame(test2)
+column_headers <- rownames(test)
+test <- bind_cols(column_headers, test)
+
+write_csv(test, paste0(output_file, "table1_descriptives.csv"))
+```
+
+```{r, echo = FALSE, results = "asis"}
+kable(test2)
+
+rm(list = setdiff(ls(), c("output_file", "state_rds_template", "state_subset_rds_template", "states", "fractional_year", "tic", "toc")))
+```
+
+## Figure 1: Estimated Recidivism Rate, Stratified by State
+
+```{r, echo = FALSE, results = "asis"}
+#load data with single conviction record per individual, from all 7 states:
+load('R:/research/data/all_states_sample.RData')
+
+#fit estimated recidivism rate stratified by state:
+allcases <- survfit(Surv(time_in_society, as.numeric(observed==1))~state, data = state_dat)
+
+mycurve <- summary(allcases, times = seq(0, 10, by = 0.1))
+
+mydat <- data.frame("time" = mycurve$time, "survival" = mycurve$surv, "lower" = mycurve$lower, "upper" = mycurve$upper, "state" = mycurve$strata)
+
+#formatting:
+mydat$state <- str_remove(mydat$state, "state=")
+
+ndat <- group_by(state_dat, state) %>%
+  summarize(n = n())
+
+mydat <- left_join(mydat, ndat, by = c("state"))
+
+write_csv(mydat, paste0(output_file, "figure1_km_statestrat.csv"))
+
+myplot <- ggplot(data = mydat) + geom_step(aes(x = time, y = survival*100, color = state, linetype = state), size = 1.2) + geom_stepribbon(aes(x = time, ymin = lower*100, ymax = upper*100, fill = state), alpha = 0.2) + theme_bw() + xlab("Time (years)") + ylab("Percent Not Re-offending") + scale_x_continuous(breaks = c(0:10)) + theme(legend.position = "bottom", legend.title = element_blank()) + coord_cartesian(ylim = c(50, 100)) + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(7)) + scale_fill_manual(values = viridis(7))
+
+myplot
+```
+
+## Figure 2: Coefficient Estimates from Cox Model
+
+```{r, echo = FALSE, results = "asis", fig.height = 7}
+#load data with single conviction record per individual, from all 7 states:
+load('R:/research/data/all_states_sample.RData')
+
+#clean up training data to get our covariates in the right format for the Cox model:
+train_dat <- filter(state_dat, assignment == "Training", time_in_society > 0)
+
+set.seed(123)
+train_dat <- group_by(train_dat, state) %>%
+  slice_sample(n = 50000) %>%
+  ungroup()
+
+train_dat$age_at_release <- train_dat$age_at_date + (train_dat$inc_time_months/12)
+train_dat$age_center <- (train_dat$age_at_release-15)/10
+train_dat$firstconv_center <- (train_dat$firstconv_age-15)/10
+train_dat$conv_year <- as.numeric(format(train_dat$adj_disp_dt, "%Y"))
+
+train_dat <- filter(train_dat, conv_year > 1950)
+
+#load fitted Cox model:
+load(paste0("R:/research/code/ElizabethFiles/Results/final_coxmodel.RData"))
+
+#This estimates the "sample size" underlying each coefficient estimate, to comply with CJARS data release requirements:
+subdat <- train_dat
+  
+nvec <- c(length(which(subdat$n_felony > 0)), length(which(subdat$n_misd > 0)), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), length(which(subdat$agg_date_dui > 0)), length(which(subdat$agg_date_property > 0)), length(which(subdat$agg_date_drug > 0)), length(which(subdat$agg_date_criminal_traffic > 0)), length(which(subdat$agg_date_violent > 0)), length(which(subdat$agg_date_public_order > 0)), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), length(which(subdat$n_felony > 0)), nrow(subdat), nrow(subdat), nrow(subdat))
+  
+coef_frame$n <- nvec
+  
+write_csv(coef_frame, paste0(output_file, "figure2_cox_coefs.csv"))
+
+#formatting
+coef_frame$Predictor2 <- factor(coef_frame$Predictor, 
+                                levels = c("Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "Felony Count?", "Misdemeanor Count?", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "Incarceration Time (months)", "Age*Felony Count?", "# Prior Felonies", "# Prior Misdemeanors", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), 
+                                labels = c("Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "Felony Count", "Misdemeanor Count", "DUI Count", "Property Count", "Drug Count", "Criminal Traffic Count", "Violent Count", "Public Order Count", "Incarceration Time (months)", "Age*Felony Count", "# Prior Felonies", "# Prior Misdemeanors", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), 
+                                ordered = TRUE)
+
+myplot <- ggplot(data = coef_frame) + annotate("rect", xmin = 13.5, xmax = 23.5, ymin = -Inf, ymax = Inf, fill = "lightgray", alpha = 0.4) + annotate("rect", xmin = 0, xmax = 13.5, ymin = -Inf, ymax = Inf, fill = "darkgray", alpha = 0.4) + annotate("rect", xmin = 23.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "white", alpha = 0.2) + geom_point(aes(x = Predictor2, y = log(HR))) + geom_segment(aes(x = Predictor2, xend = Predictor2, y = log(Lower), yend = log(Upper))) + theme_bw() + geom_hline(yintercept = 0, color = "black", linetype = "dotted") + ylab("Hazard Ratio (95% CI)") + labs(caption = TeX(r'(Less likely to reoffend \leftarrow \rightarrow More likely to reoffend)')) + theme(plot.caption = element_text(hjust = 0.48)) + scale_x_discrete(limits = rev) + scale_y_continuous(breaks = log(c(0.2, 0.5, 0.8, 1, 1.2, 1.5, 1.8)), labels = c("0.2", "0.5", "0.9", "1", "1.2", "1.5", "1.8")) + coord_flip() + xlab(" ") + theme(text = element_text(size = 12)) + theme(legend.position = "top") 
+
+myplot 
+
+rm(list = c("myplot", "myfit"))
+
+coef_frame$State <- "All States"
+```
+
+## Supplemental Figure 10: Coefficient Estimates from Cox Model, Using LOO Approach to State
+
+```{r, echo = FALSE, results = "asis", fig.height = 7}
+states <- c("AZ", "MN", "NC", "OK", "WI", "TX", "FL")
+
+#use overall model estimates to start our data storage object:
+state_coefs <- coef_frame
+
+#loop over states:
+for (i in 1:length(states)){
+  #load the Cox model that withholds state i:
+  load(paste0("R:/research/code/ElizabethFiles/Results/coxmodel_no", states[i],".RData"))
+  
+  #pool across multiple imputations:
+  pool.fit <- pool(myfit)
+
+  #formatting:
+coef_frame <- data.frame("Predictor" = c("Felony Count?", "Misdemeanor Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "Incarceration Time (months)", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*Felony Count?", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), 
+                         "HR" = exp(summary(pool.fit)$estimate),
+                         "Lower" = exp(summary(pool.fit)$estimate - 1.96*summary(pool.fit)$std.error),
+                         "Upper" = exp(summary(pool.fit)$estimate + 1.96*summary(pool.fit)$std.error))
+
+coef_frame$Predictor <- factor(coef_frame$Predictor, levels = c("Felony Count?", "Misdemeanor Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "Incarceration Time (months)", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*Felony Count?", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), ordered = TRUE)
+
+coef_frame$Predictor2 <- factor(coef_frame$Predictor, 
+                                levels = c("Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "Felony Count?", "Misdemeanor Count?", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "Incarceration Time (months)", "Age*Felony Count?", "# Prior Felonies", "# Prior Misdemeanors", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), 
+                                labels = c("Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "Felony Count", "Misdemeanor Count", "DUI Count", "Property Count", "Drug Count", "Criminal Traffic Count", "Violent Count", "Public Order Count", "Incarceration Time (months)", "Age*Felony Count", "# Prior Felonies", "# Prior Misdemeanors", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), 
+                                ordered = TRUE)
+
+  coef_frame$State <- paste0("Excluding ", states[i])
+  
+  #This estimates the "sample size" underlying each coefficient estimate, to comply with CJARS data release requirements:
+  subdat <- filter(train_dat, state!=states[i])
+  
+  nvec <- c(length(which(subdat$n_felony > 0)), length(which(subdat$n_misd > 0)), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), length(which(subdat$agg_date_dui > 0)), length(which(subdat$agg_date_property > 0)), length(which(subdat$agg_date_drug > 0)), length(which(subdat$agg_date_criminal_traffic > 0)), length(which(subdat$agg_date_violent > 0)), length(which(subdat$agg_date_public_order > 0)), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat),  nrow(subdat), nrow(subdat), length(which(subdat$n_felony > 0)), nrow(subdat), nrow(subdat), nrow(subdat))
+  
+  coef_frame$n <- nvec
+  
+  state_coefs <- rbind(state_coefs, coef_frame)
+}
+
+write_csv(state_coefs, paste0(output_file, "sfigure10_cox_coefs.csv"))
+
+myplot <- ggplot(data = state_coefs) + annotate("rect", xmin = 13.5, xmax = 23.5, ymin = -Inf, ymax = Inf, fill = "lightgray", alpha = 0.4) + annotate("rect", xmin = 0, xmax = 13.5, ymin = -Inf, ymax = Inf, fill = "darkgray", alpha = 0.4) + annotate("rect", xmin = 23.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "white", alpha = 0.2) + geom_point(aes(x = Predictor2, y = log(HR), color = State)) + geom_segment(aes(x = Predictor2, xend = Predictor2, y = log(Lower), yend = log(Upper), group = State, color = State)) + theme_bw() + geom_hline(yintercept = 0, color = "black", linetype = "dotted") + ylab("Hazard Ratio (95% CI)") + labs(caption = TeX(r'(Less likely to reoffend \leftarrow \rightarrow More likely to reoffend)')) + theme(plot.caption = element_text(hjust = 0.48)) + scale_x_discrete(limits = rev) + scale_y_continuous(breaks = log(c(0.2, 0.5, 0.8, 1, 1.2, 1.5, 1.8)), labels = c("0.2", "0.5", "0.9", "1", "1.2", "1.5", "1.8")) + coord_flip() + xlab(" ") + theme(text = element_text(size = 12)) + theme(legend.position = "top") + scale_color_manual(values = viridis(8))
+
+myplot 
+
+rm(list = c("coef_frame", "state_coefs", "myplot", "myfit"))
+```
+
+## Figure 3: Influence of Predictors in GBM
+
+```{r, echo = FALSE, results = "asis", fig.height = 7}
+#load GBM:
+load(paste0("R:/research/code/ElizabethFiles/Results/allstate_gbm_importance.RData"))
+subdat <- train_dat
+test$n <- nrow(subdat)
+
+write_csv(test, paste0(output_file, "figure3_gbm_inf.csv"))
+
+#formatting:
+test$label2 <- factor(test$label, levels = c("Prior Incarceration Time", "# Prior Prison Spells", "# Prior Unknown Counts", "# Prior Public Order Counts", "# Prior Violent Counts", "# Prior Criminal Traffic Counts", "# Prior Drug Counts", "# Prior Property Counts", "# Prior DUI Counts", "# Prior Misdemeanors", "# Prior Felonies", "Incarceration Time", "# Unknown Counts", "# Public Order Counts", "# Violent Counts", "# Criminal Traffic Counts", "# Drug Counts", "# Property Counts", "# DUI Counts", "# Misdemeanor Counts", "# Felony Counts", "Age at First Conviction", "Age"), labels = c("Prior Incarceration Time", "# Prior Prison Spells", "# Prior Unknown Counts", "# Prior Public Order Counts", "# Prior Violent Counts", "# Prior Criminal Traffic Counts", "# Prior Drug Counts", "# Prior Property Counts", "# Prior DUI Counts", "# Prior Misdemeanors", "# Prior Felonies", "Incarceration Time", "# Unknown Counts", "# Public Order Counts", "# Violent Counts", "# Criminal Traffic Counts", "# Drug Counts", "# Property Counts", "# DUI Counts", "# Misdemeanor Counts", "# Felony Counts", "Age at First Conviction", "Age at Release"), ordered = TRUE )
+
+myplot <- ggplot(data = test) + geom_histogram(aes(x = label2, y = rel.inf), stat = "identity", position = "dodge") + annotate("rect", xmin = 11.5, xmax = 21.5, ymin = -Inf, ymax = Inf, fill = "lightgray", alpha = 0.4) + annotate("rect", xmin = 0, xmax = 11.5, ymin = -Inf, ymax = Inf, fill = "darkgray", alpha = 0.4) + annotate("rect", xmin = 21.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "white", alpha = 0.2) + theme_bw() + coord_flip() + xlab(" ") + ylab("Relative Influence") + theme(text = element_text(size = 12)) + theme(legend.position = "bottom")
+
+myplot
+
+rm(list = c("test", "myplot"))
+```
+
+## Figure 4: CART
+
+```{r, echo = FALSE, results = "asis", fig.height = 7}
+#load CART:
+load(paste0("R:/research/code/ElizabethFiles/Results/allstate_cart_importance.RData"))
+
+subdat <- train_dat
+imp_vars$n <- nrow(subdat)
+
+write_csv(imp_vars, paste0(output_file, "figure4_cart_importance.csv"))
+
+#formatting:
+imp_vars$label2 <- factor(imp_vars$label, levels = c("Prior Incarceration Time", "# Prior Prison Spells", "# Prior Unknown Counts", "# Prior Public Order Counts", "# Prior Violent Counts", "# Prior Criminal Traffic Counts", "# Prior Drug Counts", "# Prior Property Counts", "# Prior DUI Counts", "# Prior Misdemeanors", "# Prior Felonies", "Incarceration Time", "# Unknown Counts", "# Public Order Counts", "# Violent Counts", "# Criminal Traffic Counts", "# Drug Counts", "# Property Counts", "# DUI Counts", "# Misdemeanor Counts", "# Felony Counts", "Age at First Conviction", "Age"), labels = c("Prior Incarceration Time", "# Prior Prison Spells", "# Prior Unknown Counts", "# Prior Public Order Counts", "# Prior Violent Counts", "# Prior Criminal Traffic Counts", "# Prior Drug Counts", "# Prior Property Counts", "# Prior DUI Counts", "# Prior Misdemeanors", "# Prior Felonies", "Incarceration Time", "# Unknown Counts", "# Public Order Counts", "# Violent Counts", "# Criminal Traffic Counts", "# Drug Counts", "# Property Counts", "# DUI Counts", "# Misdemeanor Counts", "# Felony Counts", "Age at First Conviction", "Age at Release"), ordered = TRUE )
+
+myplot <- ggplot(data = imp_vars) + geom_histogram(aes(x = label2, y = rel_inf), stat = "identity", position = "dodge") + annotate("rect", xmin = 11.5, xmax = 21.5, ymin = -Inf, ymax = Inf, fill = "lightgray", alpha = 0.4) + annotate("rect", xmin = 0, xmax = 11.5, ymin = -Inf, ymax = Inf, fill = "darkgray", alpha = 0.4) + annotate("rect", xmin = 21.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "white", alpha = 0.2) + theme_bw() + coord_flip() + xlab(" ") + ylab("Variable Importance") + theme(text = element_text(size = 12)) + theme(legend.position = "bottom")
+
+myplot
+
+rm(list = c("imp_vars", "myplot"))
+```
+
+## Figure 5: Distribution of Predicted Risk, Stratified by State
+
+```{r, echo = FALSE, results = "asis"}
+#create data storage objects:
+statecox <- list()
+stategbm <- list()
+statecart <- list()
+stackdat <- NULL
+descdat <- NULL
+
+#for attractive plotting, designating the jitter between states:
+sep <- c(-0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3)
+
+#looping over states:
+for (j in 1:length(states)){
+  #load the predictions for all states:
+  load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+
+  #setting years for predictions:
+  maxtime <- 10
+mytimes <- c(1:10)
+
+#Obtaining risk predictions conditional on how much time has passed since the last offense:
+conditional_cox <- conditional_gbm <- conditional_cart <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+for (i in 1:ncol(conditional_cox)){
+  if (i==1){
+    conditional_cox[,i] <- 1-cox_surv[,i]
+    conditional_gbm[,i] <- 1-gbm_preds[,i]
+    conditional_cart[,i] <- 1-cart_preds[,i]
+  } else{
+    conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+    conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+    conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+  }
+}
+
+#restrict to predictions from state j:
+keep_ids <- which(test_dat$state==states[j])
+conditional_cox <- conditional_cox[keep_ids,]
+conditional_gbm <- conditional_gbm[keep_ids,]
+conditional_cart <- conditional_cart[keep_ids,]
+
+#Obtaining descriptive statistics of the risk predictions for plotting:
+mydat <- data.frame("time" = c(mytimes + sep[j]-1, mytimes+sep[j]-1, mytimes+sep[j]-1), 
+                    "risk" = c(apply(conditional_cox, MARGIN = 2, FUN = quantile, 0.5), apply(conditional_gbm, MARGIN = 2, FUN = quantile, 0.5), apply(conditional_cart, MARGIN = 2, FUN = quantile, 0.5)), 
+                    "Model" = rep(c("Cox", "GBM", "CART"), each = maxtime), 
+                    "lower" = c(apply(conditional_cox, MARGIN = 2, FUN = quantile, 0.25), apply(conditional_gbm, MARGIN = 2, FUN = quantile, 0.25), apply(conditional_cart, MARGIN = 2, FUN = quantile, 0.25)), 
+                    "upper" = c(apply(conditional_cox, MARGIN = 2, FUN = quantile, 0.75), apply(conditional_gbm, MARGIN = 2, FUN = quantile, 0.75), apply(conditional_cart, MARGIN = 2, FUN = quantile, 0.75)), 
+                    "State" = states[j])
+
+stackdat <- rbind(stackdat, mydat)
+
+#Obtaining descriptive statistics of the risk predictions for in-text manuscript statistics:
+if (ncol(conditional_cox) > 10){
+  mydat <- data.frame("state" = states[j],
+                    above_5_one_year_post = length(which(conditional_cox[,2] > 0.05))/nrow(conditional_cox),
+                    max_risk_5_year_post = max(conditional_cox[,6]),
+                    min_risk_10_year_post = min(conditional_cox[,11]),
+                    max_risk_10_year_post = max(conditional_cox[,11]),
+                    min_risk_5_year_post = min(conditional_cox[,6])
+                    )
+} else{
+   mydat <- data.frame("state" = states[j],
+                    above_5_one_year_post = length(which(conditional_cox[,2] > 0.05))/nrow(conditional_cox),
+                    max_risk_5_year_post = max(conditional_cox[,6]),
+                    min_risk_10_year_post = NA_real_,
+                    max_risk_10_year_post = NA_real_,
+                    min_risk_5_year_post = min(conditional_cox[,6])
+                    )
+ }
+
+descdat <- rbind(descdat, mydat)
+
+}
+
+ndat <- group_by(state_dat, state) %>%
+  summarize(n = n())
+
+stackdat <- left_join(stackdat, ndat, by = c("State" = "state"))
+
+write_csv(stackdat, paste0(output_file, "figure5_pred_risk.csv"))
+
+myplot <- ggplot(data = filter(stackdat, time > 0.5)) + geom_point(aes(x = time, y = risk*100, color = State), size = 1.5) + geom_segment(aes(x = time, xend = time, y = lower*100, yend = upper*100, color = State), size = 0.9) + theme_bw() + xlab("Years Since Conviction") + ylab("Median (IQR) Predicted Risk \nof Conviction in Next Year (%)") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + facet_wrap(~Model) + scale_x_continuous(breaks = seq(0, 24, by = 3)) + scale_y_continuous(breaks = seq(0, 10, by = 2)) + coord_cartesian(ylim = c(0, 10)) + scale_color_manual(values = viridis(7))
+
+myplot
+
+rm(list = c("mydat", "myplot"))
+```
+
+## Supplemental Figure 11: Confidence Interval Widths of Risk Predictions, Stratified by State
+
+```{r, echo = FALSE, results = "asis"}
+stackdat <- NULL
+sep <- c(-0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3)
+
+#Loading the predictions in the validation set that have uncertainty information:
+load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+
+#Calculating interval width
+cox_cumhaz <- -1*log(cox_surv)
+cox_lower <- exp(-1*(cox_cumhaz + 1.96*cox_se))
+cox_upper <-  exp(-1*(cox_cumhaz - 1.96*cox_se))
+cox_width_all <- cox_upper-cox_lower
+
+for (j in 1:length(states)){
+
+keep_ids <- which(test_dat$state==states[j])
+cox_width <- cox_width_all[keep_ids,]
+
+mydat <- data.frame("time" = mytimes + sep[j]-1, 
+                    "med_width" = apply(cox_width, MARGIN = 2, FUN = quantile, 0.5), 
+                    "lower" = apply(cox_width, MARGIN = 2, FUN = quantile, 0.25), 
+                    "upper" = apply(cox_width, MARGIN = 2, FUN = quantile, 0.75), 
+                    "State" = states[j])
+
+stackdat <- rbind(stackdat, mydat)
+
+}
+
+ndat <- group_by(state_dat, state) %>%
+  summarize(n = n())
+
+stackdat <- left_join(stackdat, ndat, by = c("State" = "state"))
+
+write_csv(stackdat, paste0(output_file, "sfigure11_riskpred_width.csv"))
+
+myplot <- ggplot(data = filter(stackdat, time > 0.5)) + geom_point(aes(x = time, y = med_width*100, color = State), size = 1.5) + geom_segment(aes(x = time, xend = time, y = lower*100, yend = upper*100, color = State), size = 0.9) + theme_bw() + xlab("Years Since Conviction") + ylab("Median (IQR) Confidence Interval Width \nAround Predicted Recidivism Risk (%)") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_x_continuous(breaks = seq(0, 24, by = 3)) + scale_color_manual(values = viridis(7))
+
+myplot
+
+rm(list = c("mydat", "myplot"))
+```
+
+## Supplemental Figure 12: AUC of Recidivism Prediction Models
+
+```{r, echo = FALSE, results = "asis"}
+auc_dat <- NULL
+
+#loading predictions for all states from all models:
+load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+
+#observed follow-up time:
+time_vec <- test_dat$time_in_society
+
+#observed censoring indicator; setting individuals who died in prison to be censored:
+delta_vec <- test_dat$observed
+delta_vec[delta_vec==2] <- 0
+
+#setting times to evaluate AUC:
+maxtime <- 10
+mytimes <- c(1:maxtime)
+
+#calculating how many years since the last felony:
+test_dat$fel_lead <- (fractional_year(test_dat$adj_disp_dt) - fractional_year(test_dat$last_felony_date)) + (test_dat$inc_time_months/12)
+test_dat$fel_lead[is.na(test_dat$fel_lead)] <- Inf
+
+#calculating how many years since the last violent offense
+test_dat$viol_lead <- (fractional_year(test_dat$adj_disp_dt) - fractional_year(test_dat$last_viol_date)) + (test_dat$inc_time_months/12)
+test_dat$viol_lead[is.na(test_dat$viol_lead)] <- Inf
+
+#calculating how many years since the last felony or violent offense:
+test_dat$fel_viol_lead <- pmin(test_dat$fel_lead, test_dat$viol_lead)
+  
+#calculating probability of reconviction in next year, conditional on not being reconvicting in X years:
+conditional_cox <- conditional_gbm <- conditional_cart <- fel <- viol <- fel_viol <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+for (i in 1:ncol(conditional_cox)){
+  if (i==1){
+    conditional_cox[,i] <- 1-cox_surv[,i]
+    conditional_gbm[,i] <- 1-gbm_preds[,i]
+    conditional_cart[,i] <- 1-cart_preds[,i]
+    fel[,i] <- as.numeric(10 - (i-1) -test_dat$fel_lead > 0)
+    viol[,i] <- as.numeric(10 - (i-1)-test_dat$viol_lead > 0)
+    fel_viol[,i] <- as.numeric(10 - (i-1)-test_dat$fel_viol_lead > 0)
+  } else{
+    conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+    conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+    conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+    fel[,i] <- as.numeric(10 - (i-1)-test_dat$fel_lead > 0)
+    viol[,i] <- as.numeric(10 - (i-1)-test_dat$viol_lead > 0)
+    fel_viol[,i] <- as.numeric(10 - (i-1)-test_dat$fel_viol_lead > 0)
+  }
+}
+  
+  #looping over evaluation timepoints:
+  for (i in mytimes){
+  
+    if (length(which(test_dat$time_in_society > (i-1))) < 30) next 
+      
+    #evaluate tdAUC among the subset of the sample that was observed to make it to i-1 years:
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1)],
+                    marker = conditional_cox[test_dat$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Cox", "n" = length(which(test_dat$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+  
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1)],
+                    marker = conditional_gbm[test_dat$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "GBM", "n" = length(which(test_dat$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+    
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1)],
+                    marker = conditional_cart[test_dat$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "CART", "n" = length(which(test_dat$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+    
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1)],
+                    marker = fel[test_dat$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Felony in Last 10 Years", "n" = length(which(test_dat$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+    
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1)],
+                    marker = viol[test_dat$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Violent Offense in Last 10 Years", "n" = length(which(test_dat$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+    
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1)],
+                    marker = fel_viol[test_dat$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Felony or Violent Offense in Last 10 Years", "n" = length(which(test_dat$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+  }
+
+myplot <- ggplot(filter(auc_dat, time != 0 & time < 11)) + geom_line(aes(x = time, y = auc, group = Model, color = Model, linetype = Model), size = 1.2) + theme_bw() + ylab("AUC for Conviction in Next Year") + xlab("Years Since Conviction") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + guides(color = guide_legend(nrow=2, byrow=TRUE), linetype = guide_legend(nrow=2, byrow=TRUE)) + scale_color_manual(values = viridis(6)) + scale_x_continuous(breaks = seq(0, 10, by = 2))
+
+myplot
+
+write_csv(auc_dat, paste0(output_file, "sfigure12_auc_overall.csv"))
+```
+
+## Supplemental Figure 13: Leave-One-Out AUC of Recidivism Prediction Models, Stratified by State
+
+```{r, echo = FALSE, results = "asis"}
+auc_dat <- NULL
+
+for (j in 1:length(states)){
+  load(paste0("R:/research/code/ElizabethFiles/Results/testpreds_no, ", states[j], ".RData"))
+  time_vec <- this_test$time_in_society
+  delta_vec <- this_test$observed
+  delta_vec[delta_vec==2] <- 0
+
+  maxtime <- 10
+  mytimes <- c(1:maxtime)
+  
+  conditional_cox <- conditional_gbm <- conditional_cart <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]
+      conditional_cart[,i] <- 1-cart_preds[,i]
+     
+    } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+      conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+    
+    }
+  }
+  
+  
+  for (i in mytimes){
+  
+    if (length(which(this_test$time_in_society > (i-1))) < 30) next 
+      
+    perf <- timeROC(T = time_vec[this_test$time_in_society > (i-1)],
+                    delta = delta_vec[this_test$time_in_society > (i-1)],
+                    marker = conditional_cox[this_test$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Cox", "State" = states[j], "n" = length(which(this_test$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+  
+    perf <- timeROC(T = time_vec[this_test$time_in_society > (i-1)],
+                    delta = delta_vec[this_test$time_in_society > (i-1)],
+                    marker = conditional_gbm[this_test$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "GBM", "State" = states[j], "n" = length(which(this_test$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+    
+    perf <- timeROC(T = time_vec[this_test$time_in_society > (i-1)],
+                    delta = delta_vec[this_test$time_in_society > (i-1)],
+                    marker = conditional_cart[this_test$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "CART", "State" = states[j], "n" = length(which(this_test$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+    
+  }
+}
+
+myplot <- ggplot(filter(auc_dat, time != 0 & time < 11)) + geom_line(aes(x = time, y = auc, group = Model, color = Model, linetype = Model), size = 1.2) + theme_bw() + ylab("AUC for Conviction in Next Year") + xlab("Years Since Conviction") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + facet_wrap(~State) + guides(color = guide_legend(nrow=2, byrow=TRUE), linetype = guide_legend(nrow=2, byrow=TRUE)) + scale_color_manual(values = viridis(5)) + scale_x_continuous(breaks = seq(0, 10, by = 2))
+
+myplot
+
+write_csv(auc_dat, paste0(output_file, "sfigure13_auc_loo.csv"))
+```
+
+## Supplemental Figure 14: Calibration of Prediction Models One Year Post-Conviction
+
+```{r, echo = FALSE, results = "asis"}
+#setting timepoints to evaluate calibration:
+timepoints <- c(1,5)
+
+#setting models to evaluate:
+methods <- c("cox", "gbm", "cart")
+method_labs <- c("Cox", "GBM", "CART")
+
+#object to store results:
+calib_dat <- NULL
+
+#loading predictions for all states/models:
+load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+  
+maxtime <- 10
+mytimes <- c(1:maxtime)
+  
+#calculating probability of reconviction conditional on not being reconvicted in X years:
+conditional_cox <- conditional_gbm <- conditional_cart <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]
+      conditional_cart[,i] <- 1-cart_preds[,i]
+    } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+      conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+    }
+  }
+  
+#looping over evaluation timepoints and methods:
+  for (i in timepoints){
+  for (j in 1:length(methods)){
+    method <- methods[j]
+    label <- method_labs[j]
+    
+    if (length(which(test_dat$time_in_society > i)) < 30) next 
+      
+    #getting 1 minus the prediction because we'll compare it to survival:
+    if (method=="cox"){
+      test_dat$riskscore <- 1-conditional_cox[,(i+1)]
+    } else if (method=="gbm"){
+      test_dat$riskscore <- 1-conditional_gbm[,(i+1)]
+    } else if (method=="cart"){
+      test_dat$riskscore <- 1-conditional_cart[,(i+1)]
+    }
+    
+    #getting deciles of predicted risk:
+    sub_dat <- filter(test_dat, time_in_society > i)  %>%
+      mutate(risk_group = as.numeric(cut(riskscore, breaks = unique(quantile(riskscore, 
+                                                               probs = seq(0, 1, 0.1),
+                                                               na.rm = TRUE)))))
+    
+    #Obtaining mean predicted risk within each decile:
+    calib_mean <- group_by(sub_dat, risk_group) %>% 
+      summarize(pred = mean(riskscore, na.rm = TRUE),
+                n = n()) %>%
+      filter(!is.na(risk_group)) %>%
+      rename(group = risk_group) %>%
+      mutate("Time" = i,
+             "Model" = label)
+
+    #Obtaining observed survival within each decile:
+    obs_model <- survfit(Surv(time_in_society, observed==1) ~ factor(risk_group), data = 
+                       sub_dat)
+
+    survdat <- data.frame("time" = obs_model$time,
+                      "surv" = obs_model$surv,
+                      "risk_group" = rep(c(1:length(obs_model$strata)), times = obs_model$strata),
+                      "lower" = obs_model$lower,
+                      "upper" = obs_model$upper
+                      )
+
+    calib_o <- group_by(survdat, risk_group) %>%
+                summarize(obs = surv[max(which(time <= mytimes[i+1]))],
+                lower = lower[max(which(time <= mytimes[i+1]))],
+                upper = upper[max(which(time <= mytimes[i+1]))])
+
+    sub_calib <- left_join(calib_mean, calib_o, by = c("group" = "risk_group"))
+    
+    if (is.null(calib_dat)){
+      calib_dat <- sub_calib
+    } else{
+      calib_dat <- bind_rows(calib_dat, sub_calib)
+    }
+  }
+}
+
+
+#Creating calibration plot:
+myplot <- ggplot(data = filter(calib_dat, Time==1)) + geom_point(aes(x = 1-pred, y = 1-obs, color = Model), size = 1.5) + 
+  geom_line(aes(x = 1-pred, y = 1-obs, group = Model, color = Model, linetype = Model), size = 1.2) + geom_segment(aes(x = 1-pred, xend = 1-pred, y = 1-lower, yend = 1-upper, color = Model), size = 1.2) + theme_bw() + xlab("Predicted Risk of Reoffending in Next Year, \n1 Year Post-Conviction") + ylab("Observed Risk of Reoffending in Next Year, \n1 Year Post-Conviction") + geom_abline(slope = 1, intercept = 0, color = "black") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(3)) + coord_cartesian(xlim = c(0, 0.2), ylim = c(0, 0.2))
+
+myplot
+
+calib_dat <- select(calib_dat, group, pred, Time, Model, obs, lower, upper, n)
+
+write_csv(calib_dat, paste0(output_file, "sfigure14_calib_overall.csv"))
+```
+
+## Supplemental Figure 15: Leave-One-Out Calibration of Prediction Models, Stratified by State, One Year Post-Conviction
+
+```{r, echo = FALSE, results = "asis"}
+timepoints <- c(1,5)
+methods <- c("cox", "gbm", "cart")
+method_labs <- c("Cox", "GBM", "CART")
+calib_dat <- NULL
+
+for (k in 1:length(states)){
+  load(paste0("R:/research/code/ElizabethFiles/Results/testpreds_no, ", states[k], ".RData"))
+  
+  maxtime <- 10
+  mytimes <- c(1:maxtime)
+  
+  conditional_cox <- conditional_gbm <- conditional_cart <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]
+      conditional_cart[,i] <- 1-cart_preds[,i]
+    } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+      conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+    }
+  }
+  
+  for (i in timepoints){
+  for (j in 1:length(methods)){
+    method <- methods[j]
+    label <- method_labs[j]
+    
+    if (length(which(this_test$time_in_society > i)) < 30) next 
+      
+    if (method=="cox"){
+      this_test$riskscore <- 1-conditional_cox[,(i+1)]
+    } else if (method=="gbm"){
+      this_test$riskscore <- 1-conditional_gbm[,(i+1)]
+    } else if (method=="cart"){
+      this_test$riskscore <- 1-conditional_cart[,(i+1)]
+    }
+    
+    sub_dat <- filter(this_test, time_in_society > i)  %>%
+      mutate(risk_group = as.numeric(cut(riskscore, breaks = unique(quantile(riskscore, 
+                                                               probs = seq(0, 1, 0.1),
+                                                               na.rm = TRUE)))))
+    
+    #Obtaining mean predicted risk within each decile:
+    calib_mean <- group_by(sub_dat, risk_group) %>% 
+      summarize(pred = mean(riskscore, na.rm = TRUE),
+                n = n()) %>%
+      filter(!is.na(risk_group)) %>%
+      rename(group = risk_group) %>%
+      mutate("Time" = i,
+             "Model" = label,
+             "State" = states[k])
+
+    #Obtaining observed survival within each decile:
+    obs_model <- survfit(Surv(time_in_society, observed==1) ~ factor(risk_group), data = 
+                       sub_dat)
+
+    survdat <- data.frame("time" = obs_model$time,
+                      "surv" = obs_model$surv,
+                      "risk_group" = rep(c(1:length(obs_model$strata)), times = obs_model$strata),
+                      "lower" = obs_model$lower,
+                      "upper" = obs_model$upper
+                      )
+
+    calib_o <- group_by(survdat, risk_group) %>%
+                summarize(obs = surv[max(which(time <= mytimes[i+1]))],
+                lower = lower[max(which(time <= mytimes[i+1]))],
+                upper = upper[max(which(time <= mytimes[i+1]))])
+
+    sub_calib <- left_join(calib_mean, calib_o, by = c("group" = "risk_group"))
+    
+    if (is.null(calib_dat)){
+      calib_dat <- sub_calib
+    } else{
+      calib_dat <- bind_rows(calib_dat, sub_calib)
+    }
+  }
+}
+}
+
+calib_dat <- filter(calib_dat, n > 20)
+
+#Creating calibration plot:
+myplot <- ggplot(data = filter(calib_dat, Time==1)) + geom_point(aes(x = 1-pred, y = 1-obs, color = Model), size = 1.5) + 
+  geom_line(aes(x = 1-pred, y = 1-obs, group = Model, color = Model, linetype = Model), size = 1.2) + geom_segment(aes(x = 1-pred, xend = 1-pred, y = 1-lower, yend = 1-upper, color = Model), size = 1.2) + theme_bw() +
+  facet_wrap(~State) + xlab("Predicted Risk of Reoffending in Next Year, \n1 Year Post-Conviction") + ylab("Observed Risk of Reoffending in Next Year, \n1 Year Post-Conviction") + geom_abline(slope = 1, intercept = 0, color = "black") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(3)) + coord_cartesian(xlim = c(0, 0.2), ylim = c(0, 0.2))
+
+myplot
+
+calib_dat <- select(calib_dat, group, pred, Time, Model, State, obs, lower, upper, n)
+
+write_csv(calib_dat, paste0(output_file, "sfigure15_calib_loo.csv"))
+```
+
+## Supplemental Figure 16: AUC of Recidivism Models, Stratified by Race/Ethnicity and Gender
+
+```{r, echo = FALSE, results = "asis"}
+auc_dat <- NULL
+
+load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+  time_vec <- test_dat$time_in_society
+  delta_vec <- test_dat$observed
+  delta_vec[delta_vec==2] <- 0
+
+  maxtime <- 10
+  mytimes <- c(1:maxtime)
+  
+  test_dat$fel_lead <- (fractional_year(test_dat$adj_disp_dt) - fractional_year(test_dat$last_felony_date)) + (test_dat$inc_time_months/12)
+  test_dat$fel_lead[is.na(test_dat$fel_lead)] <- Inf
+  test_dat$viol_lead <- (fractional_year(test_dat$adj_disp_dt) - fractional_year(test_dat$last_viol_date)) + (test_dat$inc_time_months/12)
+  test_dat$viol_lead[is.na(test_dat$viol_lead)] <- Inf
+  test_dat$fel_viol_lead <- pmin(test_dat$fel_lead, test_dat$viol_lead)
+  
+  conditional_cox <- conditional_gbm <- conditional_cart <- fel <- viol <- fel_viol <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+   for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]
+      conditional_cart[,i] <- 1-cart_preds[,i]
+      fel[,i] <- as.numeric(10 - (i-1) -test_dat$fel_lead > 0)
+      viol[,i] <- as.numeric(10 - (i-1)-test_dat$viol_lead > 0)
+      fel_viol[,i] <- as.numeric(10 - (i-1)-test_dat$fel_viol_lead > 0)
+    } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+      conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+      fel[,i] <- as.numeric(10 - (i-1)-test_dat$fel_lead > 0)
+      viol[,i] <- as.numeric(10 - (i-1)-test_dat$viol_lead > 0)
+      fel_viol[,i] <- as.numeric(10 - (i-1)-test_dat$fel_viol_lead > 0)
+    }
+  }
+  
+  
+test_dat$rg1 <- case_when(
+  test_dat$race==1 ~ "Non-Hispanic White",
+  test_dat$race==2 ~ "Non-Hispanic Black",
+  test_dat$race==4 ~ "Hispanic",
+  test_dat$race==3 | test_dat$race==5 | test_dat$race==6 | is.na(test_dat$race) ~ "Other Race"
+)
+
+test_dat$rg <- case_when(
+  test_dat$sex==1 ~ paste0(test_dat$rg1, " Men"),
+  test_dat$sex==2 ~ paste0(test_dat$rg1, " Women")
+)
+
+ rg_group <- unique(test_dat$rg[!is.na(test_dat$rg)])
+
+for (i in mytimes){
+  for (j in rg_group){
+    
+    if (length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))) < 30) next 
+    
+  perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = (conditional_cox[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i]),
+                    cause = 1,
+                    times = i)
+  
+  newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Cox", "Race" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+  auc_dat <- rbind(auc_dat, newrow)
+  
+  perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = (conditional_gbm[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i]),
+                    cause = 1,
+                    times = i)
+  
+  newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "GBM", "Race" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+  auc_dat <- rbind(auc_dat, newrow)
+  
+  perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = (conditional_cart[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i]),
+                    cause = 1,
+                    times = i)
+  
+  newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "CART", "Race" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+  auc_dat <- rbind(auc_dat, newrow)
+  
+  perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = fel[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Felony in Last 10 Years", "Race" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+    auc_dat <- rbind(auc_dat, newrow)
+    
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = viol[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Violent Offense in Last 10 Years", "Race" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+    auc_dat <- rbind(auc_dat, newrow)
+    
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = fel_viol[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Felony or Violent Offense in Last 10 Years", "Race" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+    auc_dat <- rbind(auc_dat, newrow)
+  }
+}
+
+myplot <- ggplot(filter(auc_dat, time != 0 & time < 11, Race != "Other Race Men", Race != "Other Race Women")) + geom_line(aes(x = time, y = auc, group = Race, color = Race, linetype = Race), size = 1.2) + theme_bw() + ylab("AUC for Conviction in Next Year") + xlab("Years Since Conviction") + theme(legend.position = "bottom", legend.title = element_blank()) + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(8)) + guides(color = guide_legend(nrow = 3)) + facet_wrap(~Model)
+
+myplot
+
+write_csv(auc_dat, paste0(output_file, "sfigure16_auc_race_sex.csv"))
+```
+
+## Figure 6: Calibration of Recidivism Models One Year Post-Conviction, Stratified by Race/Ethnicity and Gender
+
+```{r, echo = FALSE, results = "asis"}
+timepoints <- c(1,5)
+methods <- c("cox", "gbm", "cart")
+method_labs <- c("Cox", "GBM", "CART")
+calib_dat <- NULL
+
+load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+  test_dat$rg1 <- case_when(
+  test_dat$race==1 ~ "Non-Hispanic White",
+  test_dat$race==2 ~ "Non-Hispanic Black",
+  test_dat$race==4 ~ "Hispanic",
+  test_dat$race==3 | test_dat$race==5 | test_dat$race==6 | is.na(test_dat$race) ~ "Other Race"
+)
+  
+  test_dat$rg <- case_when(
+  test_dat$sex==1 ~ paste0(test_dat$rg1, " Men"),
+  test_dat$sex==2 ~ paste0(test_dat$rg1, " Women")
+)
+  
+  maxtime <- 10
+  mytimes <- c(1:maxtime)
+  
+  conditional_cox <- conditional_gbm <- conditional_cart <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]
+      conditional_cart[,i] <- 1-cart_preds[,i]
+    } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+      conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+    }
+  }
+  
+  rg_group <- unique(test_dat$rg[!is.na(test_dat$rg)])
+  
+  for (i in timepoints){
+  for (j in 1:length(methods)){
+    for (k in rg_group){
+      method <- methods[j]
+      label <- method_labs[j]
+      race_dat <- filter(test_dat, rg==k)
+     
+      if (length(which(test_dat$time_in_society > i & test_dat$rg==k)) < 100) next 
+      
+    if (method=="cox"){
+      race_dat$riskscore <- 1-conditional_cox[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    } else if (method=="gbm"){
+      race_dat$riskscore <- 1-conditional_gbm[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    } else if (method=="cart"){
+      race_dat$riskscore <- 1-conditional_cart[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    }
+    
+    sub_dat <- filter(race_dat, time_in_society > i) %>%
+      mutate(risk_group = as.numeric(cut(riskscore, breaks = unique(quantile(riskscore, 
+                                                               probs = seq(0, 1, 0.1),
+                                                               na.rm = TRUE)))))
+    
+    #Obtaining mean predicted risk within each decile:
+    calib_mean <- group_by(sub_dat, risk_group) %>% 
+      summarize(pred = mean(riskscore, na.rm = TRUE),
+                n = n()) %>%
+      filter(!is.na(risk_group)) %>%
+      rename(group = risk_group) %>%
+      mutate("Time" = paste0("Year ", i),
+             "Model" = label,
+             "Race" = k)
+
+    #Obtaining observed survival within each decile:
+    obs_model <- survfit(Surv(time_in_society, observed==1) ~ factor(risk_group), data = 
+                       sub_dat)
+
+    
+    survdat <- data.frame("time" = obs_model$time,
+                      "surv" = obs_model$surv,
+                      "risk_group" = rep(c(1:length(obs_model$strata)), times = obs_model$strata),
+                      "lower" = obs_model$lower,
+                      "upper" = obs_model$upper
+                      )
+
+    calib_o <- group_by(survdat, risk_group) %>%
+                summarize(obs = surv[max(which(time <= mytimes[i+1]))],
+                lower = lower[max(which(time <= mytimes[i+1]))],
+                upper = upper[max(which(time <= mytimes[i+1]))])
+
+    sub_calib <- left_join(calib_mean, calib_o, by = c("group" = "risk_group"))
+    
+    if (is.null(calib_dat)){
+      calib_dat <- sub_calib
+    } else{
+      calib_dat <- bind_rows(calib_dat, sub_calib)
+    }
+    }
+  }
+}
+
+  calib_dat <- filter(calib_dat, n > 20)
+  
+#Creating calibration plot:
+myplot1 <- ggplot(data = filter(calib_dat, Time=="Year 1", Race != "Other Race Men", Race != "Other Race Women")) + geom_point(aes(x = 1-pred, y = 1-obs, color = Race), size = 1.5) + geom_line(aes(x = 1-pred, y = 1-obs, group = Race, color = Race, linetype = Race), size = 1.2) + geom_segment(aes(x = 1-pred, xend = 1-pred, y = 1-lower, yend = 1-upper, color = Race)) + theme_bw() +
+  facet_wrap(~Model) + xlab("Predicted Risk of Reoffending in Next Year, \nOne Year Post-Conviction") + ylab("Observed Risk of Reoffending in Next Year, \nOne Year Post-Conviction") + 
+  geom_abline(slope = 1, intercept = 0, color = "black") + 
+  theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(8)) + guides(color = guide_legend(nrow = 3)) + coord_cartesian(xlim = c(0, 0.25), ylim = c(0, 0.25))
+
+myplot1
+
+calib_dat <- select(calib_dat, group, pred, Time, Model, Race, obs, lower, upper, n)
+
+write_csv(calib_dat, paste0(output_file, "figure6_calib_race_sex.csv"))
+```
+
+## Figure 7: Independence Limited Disparate Impact of Recidivism Prediction Models
+
+```{r, echo = FALSE, results = "asis", include = FALSE}
+ildi_dat <- data.frame("time" = NA, "model" = NA, "Race" = NA, "ildi" = NA, "n" = NA)
+
+load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+ 
+maxtime <- 10
+mytimes <- c(1:maxtime)
+  
+test_dat$fel_lead <- (fractional_year(test_dat$adj_disp_dt) - fractional_year(test_dat$last_felony_date)) + (test_dat$inc_time_months/12)
+test_dat$fel_lead[is.na(test_dat$fel_lead)] <- Inf
+test_dat$viol_lead <- (fractional_year(test_dat$adj_disp_dt) - fractional_year(test_dat$last_viol_date)) + (test_dat$inc_time_months/12)
+test_dat$viol_lead[is.na(test_dat$viol_lead)] <- Inf
+test_dat$fel_viol_lead <- pmin(test_dat$fel_lead, test_dat$viol_lead)
+  
+conditional_cox <- conditional_gbm <- conditional_cart <- fel <- viol <- fel_viol <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]
+      conditional_cart[,i] <- 1-cart_preds[,i]
+      fel[,i] <- as.numeric(10 - (i-1) -test_dat$fel_lead > 0)
+      viol[,i] <- as.numeric(10 - (i-1)-test_dat$viol_lead > 0)
+      fel_viol[,i] <- as.numeric(10 - (i-1)-test_dat$fel_viol_lead > 0)
+    } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+      conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+      fel[,i] <- as.numeric(10 - (i-1)-test_dat$fel_lead > 0)
+      viol[,i] <- as.numeric(10 - (i-1)-test_dat$viol_lead > 0)
+      fel_viol[,i] <- as.numeric(10 - (i-1)-test_dat$fel_viol_lead > 0)
+    }
+  }
+  
+test_dat$rg1 <- case_when(
+  test_dat$race==1 ~ "Non-Hispanic White",
+  test_dat$race==2 ~ "Non-Hispanic Black",
+  test_dat$race==4 ~ "Hispanic",
+  test_dat$race==3 | test_dat$race==5 | test_dat$race==6 | is.na(test_dat$race) ~ "Other Race"
+)
+
+test_dat$rg <- case_when(
+  test_dat$sex==1 ~ paste0(test_dat$rg1, " Men"),
+  test_dat$sex==2 ~ paste0(test_dat$rg1, " Women")
+)
+
+rg_group <- unique(test_dat$rg[!is.na(test_dat$rg)])
+
+  for (i in mytimes){
+  avg_cont_w_cox <- mean((1-conditional_cox[test_dat$rg=="Non-Hispanic White Women" & !is.na(test_dat$rg), i]))
+  avg_cont_w_gbm <- mean((1-conditional_gbm[test_dat$rg=="Non-Hispanic White Women" & !is.na(test_dat$rg), i]))
+  avg_cont_w_cart <- mean((1-conditional_cart[test_dat$rg=="Non-Hispanic White Women" & !is.na(test_dat$rg), i]))
+  avg_cont_w_fel <- mean((1-fel[test_dat$rg=="Non-Hispanic White Women" & !is.na(test_dat$rg), i]))
+  avg_cont_w_viol <- mean((1-viol[test_dat$rg=="Non-Hispanic White Women" & !is.na(test_dat$rg), i]))
+  avg_cont_w_fel_viol <- mean((1-fel_viol[test_dat$rg=="Non-Hispanic White Women" & !is.na(test_dat$rg), i]))
+  
+  for (j in rg_group){
+    
+    avg_cont_cox <- mean((1-conditional_cox[test_dat$rg==j & !is.na(test_dat$rg), i]))
+    avg_cont_gbm <- mean((1-conditional_gbm[test_dat$rg==j & !is.na(test_dat$rg), i]))
+    avg_cont_cart <- mean((1-conditional_cart[test_dat$rg==j & !is.na(test_dat$rg), i]))
+    avg_cont_fel <- mean((1-fel[test_dat$rg==j & !is.na(test_dat$rg), i]))
+    avg_cont_viol <- mean((1-viol[test_dat$rg==j & !is.na(test_dat$rg), i]))
+    avg_cont_fel_viol <- mean((1-fel_viol[test_dat$rg==j & !is.na(test_dat$rg), i]))
+  
+  newrow <- data.frame("time" = (i-1), "model" = c("Cox", "GBM", "CART", "Felony in Last 10 Years", "Violent Offense in Last 10 Years", "Felony or Violent Offense in Last 10 Years"), "Race" = j, "ildi" = c(avg_cont_cox/avg_cont_w_cox, avg_cont_gbm/avg_cont_w_gbm, avg_cont_cart/avg_cont_w_cart, avg_cont_fel/avg_cont_w_fel, avg_cont_viol/avg_cont_w_viol, avg_cont_fel_viol/avg_cont_w_fel_viol), "n" = min(length(which(test_dat$rg==j & !is.na(test_dat$rg))), length(which(test_dat$rg=="Non-Hispanic White Women" & !is.na(test_dat$rg)))))
+  
+  ildi_dat <- rbind(ildi_dat, newrow)
+  
+  }
+}
+
+ildi_dat <- ildi_dat[-1,] %>% filter(Race != "Non-Hispanic White Women", time != 0)
+
+write_csv(ildi_dat, paste0(output_file, "figure7_ildi.csv"))
+
+ildi_dat$model <- factor(ildi_dat$model, levels =c("Cox", "GBM", "CART", "Felony in Last 10 Years", "Violent Offense in Last 10 Years", "Felony or Violent Offense in Last 10 Years"), ordered = TRUE )
+```
+
+```{r, echo = FALSE, results = "asis", fig.height = 8, fig.width = 7}
+myplot <- ggplot(filter(ildi_dat, time==2, Race != "Other Race Men", Race != "Other Race Women")) + geom_line(aes(x = model, y = ildi, group = Race, color = Race, linetype = Race), size = 1.2) + theme_bw() + ylab("Independence Limited Disparate Impact, \nOne Year Post-Conviction") + xlab("Model") + theme(legend.position = "bottom", legend.title = element_blank(), axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + geom_hline(yintercept = 0.8, color = "black", linetype = "dashed") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(7)) + guides(color = guide_legend(nrow = 3))
+
+myplot
+```
+
+## Supplemental Figure 17: Race- and Gender-Stratified AUC when Gender/Race Included
+
+```{r, echo = FALSE, results = "asis", fig.height = 8, fig.width = 6}
+auc_dat <- read_csv(paste0(output_file, "sfigure16_auc_race_sex.csv"))
+
+auc_dat <- filter(auc_dat, (Model=="Cox" | Model=="GBM" | Model=="CART")) %>%
+  mutate(Type = "No Race/Sex")
+
+load(paste0("R:/research/code/ElizabethFiles/Results/testpreds_racesex.RData"))
+time_vec <- test_dat$time_in_society
+delta_vec <- test_dat$observed
+delta_vec[delta_vec==2] <- 0
+
+maxtime <- 10
+mytimes <- c(1:10)
+
+conditional_cox <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      }
+  }
+  
+test_dat$rg1 <- case_when(
+  test_dat$race==1 ~ "Non-Hispanic White",
+  test_dat$race==2 ~ "Non-Hispanic Black",
+  test_dat$race==4 ~ "Hispanic",
+  test_dat$race==3 | test_dat$race==5 | test_dat$race==6 | is.na(test_dat$race) ~ "Other Race"
+)
+
+test_dat$rg <- case_when(
+  test_dat$sex==1 ~ paste0(test_dat$rg1, " Men"),
+  test_dat$sex==2 ~ paste0(test_dat$rg1, " Women")
+)
+
+ rg_group <- unique(test_dat$rg[!is.na(test_dat$rg)])
+
+for (i in mytimes){
+  for (j in rg_group){
+    
+    if (length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))) < 30) next 
+    
+  perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = (conditional_cox[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i]),
+                    cause = 1,
+                    times = i)
+  
+  newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Cox", "Race" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))), "Type" = "Includes Race/Sex")
+  auc_dat <- rbind(auc_dat, newrow)
+  
+  }
+}
+
+myplot <- ggplot(filter(auc_dat, time != 0 & time < 11, Model=="Cox")) + geom_line(aes(x = time, y = auc, group = Type, color = Type, linetype = Type), size = 1.2) + theme_bw() + ylab("AUC for Conviction in Next Year") + xlab("Years Since Conviction") + theme(legend.position = "bottom", legend.title = element_blank()) + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(4)[c(2:3)]) + guides(color = guide_legend(nrow = 3)) + facet_wrap(~Race, nrow = 4)
+
+myplot
+
+write_csv(auc_dat, paste0(output_file, "sfigure17_auc_racesexmodel.csv"))
+```
+
+## Supplemental Figure 18: Race- and Gender-Stratified Calibration when Gender/Race Included
+
+```{r, echo = FALSE, results = "asis", fig.height = 8, fig.width = 6}
+calib_dat <- read_csv(paste0(output_file, "figure6_calib_race_sex.csv"))
+
+calib_dat <- filter(calib_dat, (Model=="Cox" | Model=="GBM")) %>%
+  mutate(Type = "No Race/Sex")
+
+load(paste0("R:/research/code/ElizabethFiles/Results/testpreds_racesex.RData"))
+
+test_dat$rg1 <- case_when(
+  test_dat$race==1 ~ "Non-Hispanic White",
+  test_dat$race==2 ~ "Non-Hispanic Black",
+  test_dat$race==4 ~ "Hispanic",
+  test_dat$race==3 | test_dat$race==5 | test_dat$race==6 | is.na(test_dat$race) ~ "Other Race"
+)
+  
+test_dat$rg <- case_when(
+  test_dat$sex==1 ~ paste0(test_dat$rg1, " Men"),
+  test_dat$sex==2 ~ paste0(test_dat$rg1, " Women")
+)
+  
+maxtime <- 10
+mytimes <- c(1:maxtime)
+  
+conditional_cox <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+     } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      }
+  }
+  
+  rg_group <- unique(test_dat$rg[!is.na(test_dat$rg)])
+  methods <- c("cox")
+  method_labs <- c("Cox")
+  
+  
+  for (i in timepoints){
+  for (j in 1:length(methods)){
+    for (k in rg_group){
+      method <- methods[j]
+      label <- method_labs[j]
+      race_dat <- filter(test_dat, rg==k)
+     
+      if (length(which(test_dat$time_in_society > i & test_dat$rg==k)) < 100) next 
+      
+    if (method=="cox"){
+      race_dat$riskscore <- 1-conditional_cox[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    } else{
+      race_dat$riskscore <- 1-conditional_gbm[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    }
+    
+    sub_dat <- filter(race_dat, time_in_society > i) %>%
+      mutate(risk_group = as.numeric(cut(riskscore, breaks = quantile(riskscore, 
+                                                               probs = seq(0, 1, 0.1),
+                                                               na.rm = TRUE))))
+    
+    #Obtaining mean predicted risk within each decile:
+    calib_mean <- group_by(sub_dat, risk_group) %>% 
+      summarize(pred = mean(riskscore, na.rm = TRUE),
+                n = n()) %>%
+      filter(!is.na(risk_group)) %>%
+      rename(group = risk_group) %>%
+      mutate("Time" = paste0("Year ", i),
+             "Model" = label,
+             "Race" = k,
+             "Type" = "Race/Sex Included")
+
+    #Obtaining observed survival within each decile:
+    obs_model <- survfit(Surv(time_in_society, observed==1) ~ factor(risk_group), data = 
+                       sub_dat)
+
+    survdat <- data.frame("time" = obs_model$time,
+                      "surv" = obs_model$surv,
+                      "risk_group" = rep(c(1:10), times = obs_model$strata),
+                      "lower" = obs_model$lower,
+                      "upper" = obs_model$upper
+                      )
+
+    calib_o <- group_by(survdat, risk_group) %>%
+                summarize(obs = surv[max(which(time <= mytimes[i+1]))],
+                lower = lower[max(which(time <= mytimes[i+1]))],
+                upper = upper[max(which(time <= mytimes[i+1]))])
+
+    sub_calib <- left_join(calib_mean, calib_o, by = c("group" = "risk_group"))
+    
+    if (is.null(calib_dat)){
+      calib_dat <- sub_calib
+    } else{
+      calib_dat <- bind_rows(calib_dat, sub_calib)
+    }
+    }
+  }
+}
+
+#Creating calibration plot:
+myplot1 <- ggplot(data = filter(calib_dat, Model=="Cox", Time=="Year 1")) + geom_point(aes(x = 1-pred, y = 1-obs, color = Type), size = 1.5) + geom_line(aes(x = 1-pred, y = 1-obs, group = Type, color = Type, linetype = Type), size = 1.2) + geom_segment(aes(x = 1-pred, xend = 1-pred, y = 1-lower, yend = 1-upper, color = Type)) + theme_bw() +
+  facet_wrap(~Race, nrow = 4) + xlab("Predicted Risk of Reoffending in Next Year, \nOne Year Post-Conviction") + ylab("Observed Risk of Reoffending in Next Year, \nOne Year Post-Conviction") + 
+  geom_abline(slope = 1, intercept = 0, color = "black") + 
+  theme(legend.position = "bottom") + ggtitle("Cox Calibration") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(4)[c(2:3)]) + coord_cartesian(xlim = c(0, 0.25), ylim = c(0, 0.25))
+
+myplot1
+
+write_csv(calib_dat, paste0(output_file, "sfigure18_calib_racesexmodel.csv"))
+```
+
+## Supplemental Figure 19: Coefficient Estimates from Abbreviated Cox Model
+
+```{r, echo = FALSE, results = "asis", fig.height = 7}
+load('R:/research/data/all_states_sample.RData')
+
+train_dat <- filter(state_dat, assignment == "Training", time_in_society > 0)
+
+set.seed(123)
+train_dat <- group_by(train_dat, state) %>%
+  slice_sample(n = 50000) %>%
+  ungroup()
+
+train_dat$age_at_release <- train_dat$age_at_date + (train_dat$inc_time_months/12)
+train_dat$age_center <- (train_dat$age_at_release-15)/10
+train_dat$firstconv_center <- (train_dat$firstconv_age-15)/10
+train_dat$conv_year <- as.numeric(format(train_dat$adj_disp_dt, "%Y"))
+
+train_dat <- filter(train_dat, conv_year > 1950)
+
+load(paste0("R:/research/code/ElizabethFiles/Results/cox_reduced.RData"))
+
+#This estimates the "sample size" underlying each coefficient estimate, to comply with CJARS data release requirements:
+subdat <- train_dat
+  
+nvec <- c(nrow(subdat), nrow(subdat), nrow(subdat), length(which(subdat$n_felony > 0)), length(which(subdat$n_misd > 0)), length(which(subdat$n_felony > 0)), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat))
+  
+coef_frame$n <- nvec
+  
+write_csv(coef_frame, paste0(output_file, "sfigure19_cox_reduced_coefs.csv"))
+
+coef_frame$Predictor2 <- factor(coef_frame$Predictor, 
+                                levels = c("Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "Felony Count?", "Misdemeanor Count?", "Age*Felony Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age*# Prior Felonies", "Age*# Prior Misdemeanors"), 
+                                labels = c("Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "Felony Count", "Misdemeanor Count", "Age*Felony Count", "# Prior Felonies", "# Prior Misdemeanors", "Age*# Prior Felonies",  "Age*# Prior Misdemeanors"), 
+                                ordered = TRUE)
+
+myplot <- ggplot(data = coef_frame) + annotate("rect", xmin = 4.5, xmax = 7.5, ymin = -Inf, ymax = Inf, fill = "lightgray", alpha = 0.4) + annotate("rect", xmin = 0, xmax = 4.5, ymin = -Inf, ymax = Inf, fill = "darkgray", alpha = 0.4) + annotate("rect", xmin = 7.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "white", alpha = 0.2) + geom_point(aes(x = Predictor2, y = log(HR))) + geom_segment(aes(x = Predictor2, xend = Predictor2, y = log(Lower), yend = log(Upper))) + theme_bw() + geom_hline(yintercept = 0, color = "black", linetype = "dotted") + ylab("Hazard Ratio (95% CI)") + labs(caption = TeX(r'(Less likely to reoffend \leftarrow \rightarrow More likely to reoffend)')) + theme(plot.caption = element_text(hjust = 0.48)) + scale_x_discrete(limits = rev) + scale_y_continuous(breaks = log(c(0.2, 0.5, 0.8, 1, 1.2, 1.5, 1.8)), labels = c("0.2", "0.5", "0.9", "1", "1.2", "1.5", "1.8")) + coord_flip() + xlab(" ") + theme(text = element_text(size = 12)) 
+
+myplot 
+
+rm(list = c("coef_frame", "myplot", "myfit"))
+```
+
+## Supplemental Figure 20: AUC of Abbreviated Cox Model
+
+```{r, echo = FALSE, results = "asis"}
+auc_dat <- read_csv(paste0(output_file, "sfigure12_auc_overall.csv"))
+
+auc_dat <- filter(auc_dat, Model=="Cox") %>%
+  mutate(Model="Cox (Full)")
+
+load(paste0("R:/research/code/ElizabethFiles/Results/testpreds_reduced.RData"))
+time_vec <- test_dat$time_in_society
+delta_vec <- test_dat$observed
+delta_vec[delta_vec==2] <- 0
+
+maxtime <- 10
+mytimes <- c(1:maxtime)
+
+conditional_cox <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+for (i in 1:ncol(conditional_cox)){
+  if (i==1){
+    conditional_cox[,i] <- 1-cox_surv[,i]
+    } else{
+    conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+    }
+}
+  
+  
+  for (i in mytimes){
+  
+    if (length(which(test_dat$time_in_society > (i-1))) < 30) next 
+      
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1)],
+                    marker = conditional_cox[test_dat$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Cox (Reduced)", "n" = length(which(test_dat$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+  
+  }
+
+myplot <- ggplot(filter(auc_dat, time != 0 & time < 11)) + geom_line(aes(x = time, y = auc, group = Model, color = Model, linetype = Model), size = 1.2) + theme_bw() + ylab("AUC for Conviction in Next Year") + xlab("Years Since Conviction") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(2)) + scale_x_continuous(breaks = seq(0, 10, by = 2))
+
+myplot
+
+write_csv(auc_dat, paste0(output_file, "sfigure20_auc_reduced.csv"))
+```
+
+
+## Supplemental Figure 21: Calibration of Abbreviated Cox Model
+
+```{r, echo = FALSE, results = "asis"}
+timepoints <- c(1,5)
+methods <- c("cox")
+method_labs <- c("Cox (Reduced)")
+calib_dat <- read_csv(paste0(output_file, "sfigure14_calib_overall.csv"))
+
+calib_dat <- filter(calib_dat, Model=="Cox") %>%
+  mutate(Model = "Cox (Full)")
+
+load(paste0("R:/research/code/ElizabethFiles/Results/testpreds_reduced.RData"))
+  
+maxtime <- 10
+mytimes <- c(1:maxtime)
+  
+conditional_cox <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+    }
+  }
+  
+  for (i in timepoints){
+  for (j in 1:length(methods)){
+    method <- methods[j]
+    label <- method_labs[j]
+    
+    if (length(which(test_dat$time_in_society > i)) < 30) next 
+      
+    if (method=="cox"){
+      test_dat$riskscore <- 1-conditional_cox[,(i+1)]
+    } else if (method=="gbm"){
+      test_dat$riskscore <- 1-conditional_gbm[,(i+1)]
+    } else if (method=="cart"){
+      test_dat$riskscore <- 1-conditional_cart[,(i+1)]
+    }
+    
+    sub_dat <- filter(test_dat, time_in_society > i)  %>%
+      mutate(risk_group = as.numeric(cut(riskscore, breaks = unique(quantile(riskscore, 
+                                                               probs = seq(0, 1, 0.1),
+                                                               na.rm = TRUE)))))
+    
+    #Obtaining mean predicted risk within each decile:
+    calib_mean <- group_by(sub_dat, risk_group) %>% 
+      summarize(pred = mean(riskscore, na.rm = TRUE),
+                n = n()) %>%
+      filter(!is.na(risk_group)) %>%
+      rename(group = risk_group) %>%
+      mutate("Time" = i,
+             "Model" = label)
+
+    #Obtaining observed survival within each decile:
+    obs_model <- survfit(Surv(time_in_society, observed==1) ~ factor(risk_group), data = 
+                       sub_dat)
+
+    survdat <- data.frame("time" = obs_model$time,
+                      "surv" = obs_model$surv,
+                      "risk_group" = rep(c(1:length(obs_model$strata)), times = obs_model$strata),
+                      "lower" = obs_model$lower,
+                      "upper" = obs_model$upper
+                      )
+
+    calib_o <- group_by(survdat, risk_group) %>%
+                summarize(obs = surv[max(which(time <= mytimes[i+1]))],
+                lower = lower[max(which(time <= mytimes[i+1]))],
+                upper = upper[max(which(time <= mytimes[i+1]))])
+
+    sub_calib <- left_join(calib_mean, calib_o, by = c("group" = "risk_group"))
+    
+    if (is.null(calib_dat)){
+      calib_dat <- sub_calib
+    } else{
+      calib_dat <- bind_rows(calib_dat, sub_calib)
+    }
+  }
+}
+
+
+#Creating calibration plot:
+myplot <- ggplot(data = filter(calib_dat, Time==1)) + geom_point(aes(x = 1-pred, y = 1-obs, color = Model), size = 1.5) + 
+  geom_line(aes(x = 1-pred, y = 1-obs, group = Model, color = Model, linetype = Model), size = 1.2) + geom_segment(aes(x = 1-pred, xend = 1-pred, y = 1-lower, yend = 1-upper, color = Model), size = 1.2) + theme_bw() +
+  xlab("Predicted Risk of Reoffending in Next Year, \n1 Year Post-Conviction") + ylab("Observed Risk of Reoffending in Next Year, \n1 Year Post-Conviction") + geom_abline(slope = 1, intercept = 0, color = "black") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(2)) + coord_cartesian(xlim = c(0, 0.2), ylim = c(0, 0.2))
+
+myplot
+
+calib_dat <- select(calib_dat, group, pred, Time, Model, obs, lower, upper, n)
+
+write_csv(calib_dat, paste0(output_file, "sfigure21_calib_reduced.csv"))
+```
+
+## Supplemental Figure 22: Race- and Gender-Stratified Calibration of Abbreviated Cox Model
+
+```{r, echo = FALSE, results = "asis"}
+calib_dat <- read_csv(paste0(output_file, "figure6_calib_race_sex.csv"))
+
+calib_dat <- filter(calib_dat, Model=="Cox") %>%
+  mutate(Model = "Cox (Full)")
+
+load(paste0("R:/research/code/ElizabethFiles/Results/testpreds_reduced.RData"))
+  test_dat$rg1 <- case_when(
+  test_dat$race==1 ~ "Non-Hispanic White",
+  test_dat$race==2 ~ "Non-Hispanic Black",
+  test_dat$race==4 ~ "Hispanic",
+  test_dat$race==3 | test_dat$race==5 | test_dat$race==6 | is.na(test_dat$race) ~ "Other Race"
+)
+  
+  test_dat$rg <- case_when(
+  test_dat$sex==1 ~ paste0(test_dat$rg1, " Men"),
+  test_dat$sex==2 ~ paste0(test_dat$rg1, " Women")
+)
+  
+  maxtime <- 10
+  mytimes <- c(1:maxtime)
+  
+  conditional_cox <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      }
+  }
+  
+  rg_group <- unique(test_dat$rg[!is.na(test_dat$rg)])
+  
+  for (i in timepoints){
+  for (j in 1:length(methods)){
+    for (k in rg_group){
+      method <- methods[j]
+      label <- method_labs[j]
+      race_dat <- filter(test_dat, rg==k)
+     
+      if (length(which(test_dat$time_in_society > i & test_dat$rg==k)) < 100) next 
+      
+    if (method=="cox"){
+      race_dat$riskscore <- 1-conditional_cox[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    } else if (method=="gbm"){
+      race_dat$riskscore <- 1-conditional_gbm[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    } else if (method=="cart"){
+      race_dat$riskscore <- 1-conditional_cart[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    }
+    
+    sub_dat <- filter(race_dat, time_in_society > i) %>%
+      mutate(risk_group = as.numeric(cut(riskscore, breaks = unique(quantile(riskscore, 
+                                                               probs = seq(0, 1, 0.1),
+                                                               na.rm = TRUE)))))
+    
+    #Obtaining mean predicted risk within each decile:
+    calib_mean <- group_by(sub_dat, risk_group) %>% 
+      summarize(pred = mean(riskscore, na.rm = TRUE),
+                n = n()) %>%
+      filter(!is.na(risk_group)) %>%
+      rename(group = risk_group) %>%
+      mutate("Time" = paste0("Year ", i),
+             "Model" = label,
+             "Race" = k)
+
+    #Obtaining observed survival within each decile:
+    obs_model <- survfit(Surv(time_in_society, observed==1) ~ factor(risk_group), data = 
+                       sub_dat)
+
+    
+    survdat <- data.frame("time" = obs_model$time,
+                      "surv" = obs_model$surv,
+                      "risk_group" = rep(c(1:length(obs_model$strata)), times = obs_model$strata),
+                      "lower" = obs_model$lower,
+                      "upper" = obs_model$upper
+                      )
+
+    calib_o <- group_by(survdat, risk_group) %>%
+                summarize(obs = surv[max(which(time <= mytimes[i+1]))],
+                lower = lower[max(which(time <= mytimes[i+1]))],
+                upper = upper[max(which(time <= mytimes[i+1]))])
+
+    sub_calib <- left_join(calib_mean, calib_o, by = c("group" = "risk_group"))
+    
+    if (is.null(calib_dat)){
+      calib_dat <- sub_calib
+    } else{
+      calib_dat <- bind_rows(calib_dat, sub_calib)
+    }
+    }
+  }
+}
+
+#Creating calibration plot:
+myplot1 <- ggplot(data = filter(calib_dat, Time=="Year 1", Race != "Other Race Men", Race != "Other Race Women")) + geom_point(aes(x = 1-pred, y = 1-obs, color = Race), size = 1.5) + geom_line(aes(x = 1-pred, y = 1-obs, group = Race, color = Race, linetype = Race), size = 1.2) + geom_segment(aes(x = 1-pred, xend = 1-pred, y = 1-lower, yend = 1-upper, color = Race)) + theme_bw() +
+  facet_wrap(~Model) + xlab("Predicted Risk of Reoffending in Next Year, \nOne Year Post-Conviction") + ylab("Observed Risk of Reoffending in Next Year, \nOne Year Post-Conviction") + 
+  geom_abline(slope = 1, intercept = 0, color = "black") + 
+  theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(8)) + guides(color = guide_legend(nrow = 3)) + coord_cartesian(xlim = c(0, 0.25), ylim = c(0, 0.25))
+
+myplot1
+
+calib_dat <- select(calib_dat, group, pred, Time, Model, Race, obs, lower, upper, n)
+
+write_csv(calib_dat, paste0(output_file, "sfigure22_calib_race_sex_reduced.csv"))
+```
+
+## Supplemental Figure 23: Coefficient Estimates from Felony Only Model
+
+```{r, echo = FALSE, results = "asis", fig.height = 7}
+load('R:/research/data/all_states_sample_fel.RData')
+
+train_dat <- filter(state_dat_fel, assignment == "Training", time_in_society > 0)
+
+set.seed(123)
+train_dat <- group_by(train_dat, state) %>%
+  slice_sample(n = 50000) %>%
+  ungroup()
+
+train_dat$age_at_release <- train_dat$age_at_date + (train_dat$inc_time_months/12)
+train_dat$age_center <- (train_dat$age_at_release-15)/10
+train_dat$firstconv_center <- (train_dat$firstconv_age-15)/10
+train_dat$conv_year <- as.numeric(format(train_dat$adj_disp_dt, "%Y"))
+
+train_dat <- filter(train_dat, conv_year > 1950)
+
+load(paste0("R:/research/code/ElizabethFiles/Results/felonly_coxmodel.RData"))
+
+#This estimates the "sample size" underlying each coefficient estimate, to comply with CJARS data release requirements:
+subdat <- train_dat
+  
+nvec <- c(length(which(subdat$n_felony > 0)), length(which(subdat$n_misd > 0)), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), length(which(subdat$agg_date_dui > 0)), length(which(subdat$agg_date_property > 0)), length(which(subdat$agg_date_drug > 0)), length(which(subdat$agg_date_criminal_traffic > 0)), length(which(subdat$agg_date_violent > 0)), length(which(subdat$agg_date_public_order > 0)), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), nrow(subdat), length(which(subdat$n_felony > 0)), nrow(subdat), nrow(subdat), nrow(subdat))
+  
+coef_frame$n <- nvec
+
+old_coefs <- read_csv(paste0(output_file, "figure2_cox_coefs.csv"))
+
+old_coefs$Model <- "All Convictions"
+coef_frame$Model <- "Felony Convictions Only"
+
+coef_frame <- bind_rows(coef_frame, old_coefs)
+  
+write_csv(coef_frame, paste0(output_file, "sfigure23_felonly_cox_coefs.csv"))
+
+coef_frame$Predictor2 <- factor(coef_frame$Predictor, 
+                                levels = c("Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "Felony Count?", "Misdemeanor Count?", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "Incarceration Time (months)", "Age*Felony Count?", "# Prior Felonies", "# Prior Misdemeanors", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), 
+                                labels = c("Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "Felony Count", "Misdemeanor Count", "DUI Count", "Property Count", "Drug Count", "Criminal Traffic Count", "Violent Count", "Public Order Count", "Incarceration Time (months)", "Age*Felony Count", "# Prior Felonies", "# Prior Misdemeanors", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), 
+                                ordered = TRUE)
+
+myplot <- ggplot(data = coef_frame) + annotate("rect", xmin = 13.5, xmax = 23.5, ymin = -Inf, ymax = Inf, fill = "lightgray", alpha = 0.4) + annotate("rect", xmin = 0, xmax = 13.5, ymin = -Inf, ymax = Inf, fill = "darkgray", alpha = 0.4) + annotate("rect", xmin = 23.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "white", alpha = 0.2) + geom_point(aes(x = Predictor2, y = log(HR), color = Model)) + geom_segment(aes(x = Predictor2, xend = Predictor2, y = log(Lower), yend = log(Upper), group = Model, color = Model)) + theme_bw() + geom_hline(yintercept = 0, color = "black", linetype = "dotted") + ylab("Hazard Ratio (95% CI)") + labs(caption = TeX(r'(Less likely to reoffend \leftarrow \rightarrow More likely to reoffend)')) + theme(plot.caption = element_text(hjust = 0.48)) + scale_x_discrete(limits = rev) + scale_y_continuous(breaks = log(c(0.2, 0.5, 0.8, 1, 1.2, 1.5, 1.8)), labels = c("0.2", "0.5", "0.9", "1", "1.2", "1.5", "1.8")) + coord_flip() + xlab(" ") + theme(text = element_text(size = 12)) + theme(legend.position = "top") + scale_color_manual(values = viridis(3))
+
+myplot 
+
+rm(list = c("myplot", "myfit"))
+```
+
+## Supplemental Figure 24: AUC of Felony Only Model
+
+```{r, echo = FALSE, results = "asis"}
+auc_dat <- read_csv(paste0(output_file, "sfigure12_auc_overall.csv"))
+
+auc_dat <- filter(auc_dat, Model=="Cox") %>%
+  mutate(Model="All Convictions")
+
+load(paste0("R:/research/code/ElizabethFiles/Results/felonly_testpreds.RData"))
+time_vec <- test_dat$time_in_society
+delta_vec <- test_dat$observed
+delta_vec[delta_vec==2] <- 0
+
+maxtime <- 10
+mytimes <- c(1:maxtime)
+
+conditional_cox <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+for (i in 1:ncol(conditional_cox)){
+  if (i==1){
+    conditional_cox[,i] <- 1-cox_surv[,i]
+    } else{
+    conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+    }
+}
+  
+  
+  for (i in mytimes){
+  
+    if (length(which(test_dat$time_in_society > (i-1))) < 30) next 
+      
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1)],
+                    marker = conditional_cox[test_dat$time_in_society > (i-1), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Felony Convictions Only", "n" = length(which(test_dat$time_in_society > (i-1))))
+    auc_dat <- rbind(auc_dat, newrow)
+  
+  }
+
+myplot <- ggplot(filter(auc_dat, time != 0 & time < 11)) + geom_line(aes(x = time, y = auc, group = Model, color = Model, linetype = Model), size = 1.2) + theme_bw() + ylab("AUC for Conviction in Next Year") + xlab("Years Since Conviction") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(2)) + scale_x_continuous(breaks = seq(0, 10, by = 2))
+
+myplot
+
+write_csv(auc_dat, paste0(output_file, "sfigure24_auc_felonly.csv"))
+```
+
+## Supplemental Figure 25: Calibration of Felony Only Model
+
+```{r, echo = FALSE, results = "asis"}
+timepoints <- c(1,5)
+methods <- c("cox")
+method_labs <- c("Felony Convictions Only")
+calib_dat <- read_csv(paste0(output_file, "sfigure14_calib_overall.csv"))
+
+calib_dat <- filter(calib_dat, Model=="Cox") %>%
+  mutate(Model = "All Convictions")
+
+load(paste0("R:/research/code/ElizabethFiles/Results/felonly_testpreds.RData"))
+  
+maxtime <- 10
+mytimes <- c(1:maxtime)
+  
+conditional_cox <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+    }
+  }
+  
+  for (i in timepoints){
+  for (j in 1:length(methods)){
+    method <- methods[j]
+    label <- method_labs[j]
+    
+    if (length(which(test_dat$time_in_society > i)) < 30) next 
+      
+    if (method=="cox"){
+      test_dat$riskscore <- 1-conditional_cox[,(i+1)]
+    } else if (method=="gbm"){
+      test_dat$riskscore <- 1-conditional_gbm[,(i+1)]
+    } else if (method=="cart"){
+      test_dat$riskscore <- 1-conditional_cart[,(i+1)]
+    }
+    
+    sub_dat <- filter(test_dat, time_in_society > i)  %>%
+      mutate(risk_group = as.numeric(cut(riskscore, breaks = unique(quantile(riskscore, 
+                                                               probs = seq(0, 1, 0.1),
+                                                               na.rm = TRUE)))))
+    
+    #Obtaining mean predicted risk within each decile:
+    calib_mean <- group_by(sub_dat, risk_group) %>% 
+      summarize(pred = mean(riskscore, na.rm = TRUE),
+                n = n()) %>%
+      filter(!is.na(risk_group)) %>%
+      rename(group = risk_group) %>%
+      mutate("Time" = i,
+             "Model" = label)
+
+    #Obtaining observed survival within each decile:
+    obs_model <- survfit(Surv(time_in_society, observed==1) ~ factor(risk_group), data = 
+                       sub_dat)
+
+    survdat <- data.frame("time" = obs_model$time,
+                      "surv" = obs_model$surv,
+                      "risk_group" = rep(c(1:length(obs_model$strata)), times = obs_model$strata),
+                      "lower" = obs_model$lower,
+                      "upper" = obs_model$upper
+                      )
+
+    calib_o <- group_by(survdat, risk_group) %>%
+                summarize(obs = surv[max(which(time <= mytimes[i+1]))],
+                lower = lower[max(which(time <= mytimes[i+1]))],
+                upper = upper[max(which(time <= mytimes[i+1]))])
+
+    sub_calib <- left_join(calib_mean, calib_o, by = c("group" = "risk_group"))
+    
+    if (is.null(calib_dat)){
+      calib_dat <- sub_calib
+    } else{
+      calib_dat <- bind_rows(calib_dat, sub_calib)
+    }
+  }
+}
+
+
+#Creating calibration plot:
+myplot <- ggplot(data = filter(calib_dat, Time==1)) + geom_point(aes(x = 1-pred, y = 1-obs, color = Model), size = 1.5) + 
+  geom_line(aes(x = 1-pred, y = 1-obs, group = Model, color = Model, linetype = Model), size = 1.2) + geom_segment(aes(x = 1-pred, xend = 1-pred, y = 1-lower, yend = 1-upper, color = Model), size = 1.2) + theme_bw() +
+  xlab("Predicted Risk of Reoffending in Next Year, \n1 Year Post-Conviction") + ylab("Observed Risk of Reoffending in Next Year, \n1 Year Post-Conviction") + geom_abline(slope = 1, intercept = 0, color = "black") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(2)) + coord_cartesian(xlim = c(0, 0.2), ylim = c(0, 0.2))
+
+myplot
+
+calib_dat <- select(calib_dat, group, pred, Time, Model, obs, lower, upper, n)
+
+write_csv(calib_dat, paste0(output_file, "sfigure25_calib_felonly.csv"))
+```
+
+## Supplemental Figure 26: Race- and Gender-Stratified Calibration of Felony Only Model
+
+```{r, echo = FALSE, results = "asis"}
+calib_dat <- read_csv(paste0(output_file, "figure6_calib_race_sex.csv"))
+
+calib_dat <- filter(calib_dat, Model=="Cox") %>%
+  mutate(Model = "All Convictions")
+
+load(paste0("R:/research/code/ElizabethFiles/Results/felonly_testpreds.RData"))
+  test_dat$rg1 <- case_when(
+  test_dat$race==1 ~ "Non-Hispanic White",
+  test_dat$race==2 ~ "Non-Hispanic Black",
+  test_dat$race==4 ~ "Hispanic",
+  test_dat$race==3 | test_dat$race==5 | test_dat$race==6 | is.na(test_dat$race) ~ "Other Race"
+)
+  
+  test_dat$rg <- case_when(
+  test_dat$sex==1 ~ paste0(test_dat$rg1, " Men"),
+  test_dat$sex==2 ~ paste0(test_dat$rg1, " Women")
+)
+  
+  maxtime <- 10
+  mytimes <- c(1:maxtime)
+  
+  conditional_cox <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      }
+  }
+  
+  rg_group <- unique(test_dat$rg[!is.na(test_dat$rg)])
+  
+  for (i in timepoints){
+  for (j in 1:length(methods)){
+    for (k in rg_group){
+      method <- methods[j]
+      label <- method_labs[j]
+      race_dat <- filter(test_dat, rg==k)
+     
+      if (length(which(test_dat$time_in_society > i & test_dat$rg==k)) < 100) next 
+      
+    if (method=="cox"){
+      race_dat$riskscore <- 1-conditional_cox[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    } else if (method=="gbm"){
+      race_dat$riskscore <- 1-conditional_gbm[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    } else if (method=="cart"){
+      race_dat$riskscore <- 1-conditional_cart[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    }
+    
+    sub_dat <- filter(race_dat, time_in_society > i) %>%
+      mutate(risk_group = as.numeric(cut(riskscore, breaks = unique(quantile(riskscore, 
+                                                               probs = seq(0, 1, 0.1),
+                                                               na.rm = TRUE)))))
+    
+    #Obtaining mean predicted risk within each decile:
+    calib_mean <- group_by(sub_dat, risk_group) %>% 
+      summarize(pred = mean(riskscore, na.rm = TRUE),
+                n = n()) %>%
+      filter(!is.na(risk_group)) %>%
+      rename(group = risk_group) %>%
+      mutate("Time" = paste0("Year ", i),
+             "Model" = label,
+             "Race" = k)
+
+    #Obtaining observed survival within each decile:
+    obs_model <- survfit(Surv(time_in_society, observed==1) ~ factor(risk_group), data = 
+                       sub_dat)
+
+    
+    survdat <- data.frame("time" = obs_model$time,
+                      "surv" = obs_model$surv,
+                      "risk_group" = rep(c(1:length(obs_model$strata)), times = obs_model$strata),
+                      "lower" = obs_model$lower,
+                      "upper" = obs_model$upper
+                      )
+
+    calib_o <- group_by(survdat, risk_group) %>%
+                summarize(obs = surv[max(which(time <= mytimes[i+1]))],
+                lower = lower[max(which(time <= mytimes[i+1]))],
+                upper = upper[max(which(time <= mytimes[i+1]))])
+
+    sub_calib <- left_join(calib_mean, calib_o, by = c("group" = "risk_group"))
+    
+    if (is.null(calib_dat)){
+      calib_dat <- sub_calib
+    } else{
+      calib_dat <- bind_rows(calib_dat, sub_calib)
+    }
+    }
+  }
+}
+
+#Creating calibration plot:
+myplot1 <- ggplot(data = filter(calib_dat, Time=="Year 1", Race != "Other Race Men", Race != "Other Race Women")) + geom_point(aes(x = 1-pred, y = 1-obs, color = Race), size = 1.5) + geom_line(aes(x = 1-pred, y = 1-obs, group = Race, color = Race, linetype = Race), size = 1.2) + geom_segment(aes(x = 1-pred, xend = 1-pred, y = 1-lower, yend = 1-upper, color = Race)) + theme_bw() +
+  facet_wrap(~Model) + xlab("Predicted Risk of Reoffending in Next Year, \nOne Year Post-Conviction") + ylab("Observed Risk of Reoffending in Next Year, \nOne Year Post-Conviction") + 
+  geom_abline(slope = 1, intercept = 0, color = "black") + 
+  theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(8)) + guides(color = guide_legend(nrow = 3)) + coord_cartesian(xlim = c(0, 0.25), ylim = c(0, 0.25))
+
+myplot1
+
+calib_dat <- select(calib_dat, group, pred, Time, Model, Race, obs, lower, upper, n)
+
+write_csv(calib_dat, paste0(output_file, "sfigure26_calib_race_sex_felonly.csv"))
+```
+
+## Supplemental Figure 27: Risk Predictions Stratified by Calendar Time
+
+```{r, echo = FALSE, results = "asis"}
+stackdat <- NULL
+sep <- c(-0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3)
+load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+
+test_dat$year_group <- case_when(
+  test_dat$conv_year <= 1990 ~ "Pre-1990",
+  test_dat$conv_year > 1990 & test_dat$conv_year <=1995 ~ "1991-1995",
+  test_dat$conv_year > 1995 & test_dat$conv_year <= 2000 ~ "1996-2000",
+  test_dat$conv_year > 2000 & test_dat$conv_year <= 2005 ~ "2001-2005",
+  test_dat$conv_year > 2005 & test_dat$conv_year <= 2010 ~ "2006-2010",
+  test_dat$conv_year > 2010 & test_dat$conv_year <= 2015 ~ "2011-2015",
+  test_dat$conv_year > 2015 ~ "2016 onwards"
+)
+
+year_vec <- c("Pre-1990", "1991-1995", "1996-2000", "2001-2005", "2006-2010", "2011-2015", "2016 onwards")
+
+maxtime <- 10
+mytimes <- c(1:10)
+
+#Obtaining risk predictions conditional on how much time has passed since the last offense:
+conditional_cox <- conditional_gbm <- conditional_cart <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+for (i in 1:ncol(conditional_cox)){
+  if (i==1){
+    conditional_cox[,i] <- 1-cox_surv[,i]
+    conditional_gbm[,i] <- 1-gbm_preds[,i]
+    conditional_cart[,i] <- 1-cart_preds[,i]
+  } else{
+    conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+    conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+    conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+  }
+}
+
+for (j in 1:length(year_vec)){
+  
+keep_ids <- which(test_dat$year_group==year_vec[j])
+sub_cox <- conditional_cox[keep_ids,]
+sub_gbm <- conditional_gbm[keep_ids,]
+sub_cart <- conditional_cart[keep_ids,]
+
+#Obtaining descriptive statistics of the risk predictions for plotting:
+mydat <- data.frame("time" = c(mytimes + sep[j]-1, mytimes+sep[j]-1, mytimes+sep[j]-1), 
+                    "risk" = c(apply(sub_cox, MARGIN = 2, FUN = quantile, 0.5), apply(sub_gbm, MARGIN = 2, FUN = quantile, 0.5), apply(sub_cart, MARGIN = 2, FUN = quantile, 0.5)), 
+                    "Model" = rep(c("Cox", "GBM", "CART"), each = maxtime), 
+                    "lower" = c(apply(sub_cox, MARGIN = 2, FUN = quantile, 0.25), apply(sub_gbm, MARGIN = 2, FUN = quantile, 0.25), apply(sub_cart, MARGIN = 2, FUN = quantile, 0.25)), 
+                    "upper" = c(apply(sub_cox, MARGIN = 2, FUN = quantile, 0.75), apply(sub_gbm, MARGIN = 2, FUN = quantile, 0.75), apply(sub_cart, MARGIN = 2, FUN = quantile, 0.75)), 
+                    "Year of Conviction" = year_vec[j])
+
+stackdat <- rbind(stackdat, mydat)
+
+}
+
+load('R:/research/data/all_states_sample.RData')
+
+state_dat$conv_year <- as.numeric(format(state_dat$adj_disp_dt, "%Y"))
+state_dat$year_group <- case_when(
+  state_dat$conv_year <= 1990 ~ "Pre-1990",
+  state_dat$conv_year > 1990 & state_dat$conv_year <=1995 ~ "1991-1995",
+  state_dat$conv_year > 1995 & state_dat$conv_year <= 2000 ~ "1996-2000",
+  state_dat$conv_year > 2000 & state_dat$conv_year <= 2005 ~ "2001-2005",
+  state_dat$conv_year > 2005 & state_dat$conv_year <= 2010 ~ "2006-2010",
+  state_dat$conv_year > 2010 & state_dat$conv_year <= 2015 ~ "2011-2015",
+  state_dat$conv_year > 2015 ~ "2016 onwards"
+)
+
+ndat <- group_by(state_dat, year_group) %>%
+  summarize(n = n())
+
+stackdat <- left_join(stackdat, ndat, by = c("Year.of.Conviction" = "year_group"))
+
+write_csv(stackdat, paste0(output_file, "sfigure27_pred_risk_year.csv"))
+
+stackdat$Year.of.Conviction <- factor(stackdat$Year.of.Conviction, levels = c("Pre-1990", "1991-1995", "1996-2000", "2001-2005", "2006-2010", "2011-2015", "2016 onwards"), ordered = TRUE)
+
+myplot <- ggplot(data = filter(stackdat, time > 0.5)) + geom_point(aes(x = time, y = risk*100, color = Year.of.Conviction), size = 1.5) + geom_segment(aes(x = time, xend = time, y = lower*100, yend = upper*100, color = Year.of.Conviction), size = 0.9) + theme_bw() + xlab("Years Since Conviction") + ylab("Median (IQR) Predicted Risk \nof Conviction in Next Year (%)") + theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + facet_wrap(~Model) + scale_x_continuous(breaks = seq(0, 24, by = 3)) + scale_y_continuous(breaks = seq(0, 10, by = 2)) + coord_cartesian(ylim = c(0, 10)) + scale_color_manual(values = viridis(7))
+
+myplot
+
+rm(list = c("mydat", "myplot"))
+```
+
+## Supplemental Figure 28: AUC Stratified by Calendar Time
+
+```{r, echo = FALSE, results = "asis"}
+auc_dat <- NULL
+
+load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+  time_vec <- test_dat$time_in_society
+  delta_vec <- test_dat$observed
+  delta_vec[delta_vec==2] <- 0
+
+  maxtime <- 10
+  mytimes <- c(1:maxtime)
+  
+  test_dat$rg <- case_when(
+  test_dat$conv_year <= 1990 ~ "Pre-1990",
+  test_dat$conv_year > 1990 & test_dat$conv_year <=1995 ~ "1991-1995",
+  test_dat$conv_year > 1995 & test_dat$conv_year <= 2000 ~ "1996-2000",
+  test_dat$conv_year > 2000 & test_dat$conv_year <= 2005 ~ "2001-2005",
+  test_dat$conv_year > 2005 & test_dat$conv_year <= 2010 ~ "2006-2010",
+  test_dat$conv_year > 2010 & test_dat$conv_year <= 2015 ~ "2011-2015",
+  test_dat$conv_year > 2015 ~ "2016 onwards"
+)
+
+rg_group <- c("Pre-1990", "1991-1995", "1996-2000", "2001-2005", "2006-2010", "2011-2015", "2016 onwards")
+
+  test_dat$fel_lead <- (fractional_year(test_dat$adj_disp_dt) - fractional_year(test_dat$last_felony_date)) + (test_dat$inc_time_months/12)
+  test_dat$fel_lead[is.na(test_dat$fel_lead)] <- Inf
+  test_dat$viol_lead <- (fractional_year(test_dat$adj_disp_dt) - fractional_year(test_dat$last_viol_date)) + (test_dat$inc_time_months/12)
+  test_dat$viol_lead[is.na(test_dat$viol_lead)] <- Inf
+  test_dat$fel_viol_lead <- pmin(test_dat$fel_lead, test_dat$viol_lead)
+  
+  conditional_cox <- conditional_gbm <- conditional_cart <- fel <- viol <- fel_viol <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+   for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]
+      conditional_cart[,i] <- 1-cart_preds[,i]
+      fel[,i] <- as.numeric(10 - (i-1) -test_dat$fel_lead > 0)
+      viol[,i] <- as.numeric(10 - (i-1)-test_dat$viol_lead > 0)
+      fel_viol[,i] <- as.numeric(10 - (i-1)-test_dat$fel_viol_lead > 0)
+    } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+      conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+      fel[,i] <- as.numeric(10 - (i-1)-test_dat$fel_lead > 0)
+      viol[,i] <- as.numeric(10 - (i-1)-test_dat$viol_lead > 0)
+      fel_viol[,i] <- as.numeric(10 - (i-1)-test_dat$fel_viol_lead > 0)
+    }
+  }
+  
+for (i in mytimes){
+  for (j in rg_group){
+    
+    if (length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))) < 30) next 
+    
+  perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = (conditional_cox[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i]),
+                    cause = 1,
+                    times = i)
+  
+  newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Cox", "Year" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+  auc_dat <- rbind(auc_dat, newrow)
+  
+  perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = (conditional_gbm[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i]),
+                    cause = 1,
+                    times = i)
+  
+  newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "GBM", "Year" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+  auc_dat <- rbind(auc_dat, newrow)
+  
+  perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = (conditional_cart[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i]),
+                    cause = 1,
+                    times = i)
+  
+  newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "CART", "Year" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+  auc_dat <- rbind(auc_dat, newrow)
+  
+  perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = fel[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Felony in Last 10 Years", "Year" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+    auc_dat <- rbind(auc_dat, newrow)
+    
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = viol[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Violent Offense in Last 10 Years", "Year" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+    auc_dat <- rbind(auc_dat, newrow)
+    
+    perf <- timeROC(T = time_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    delta = delta_vec[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg)],
+                    marker = fel_viol[test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg), i],
+                    cause = 1,
+                    times = i)
+  
+    newrow <- data.frame("time" = (i-1), "auc" = perf$AUC[2], "Model" = "Felony or Violent Offense in Last 10 Years", "Year" = j, "n" = length(which(test_dat$time_in_society > (i-1) & test_dat$rg==j & !is.na(test_dat$rg))))
+    auc_dat <- rbind(auc_dat, newrow)
+  }
+}
+
+auc_dat$Year <- factor(auc_dat$Year, levels = c("Pre-1990", "1991-1995", "1996-2000", "2001-2005", "2006-2010", "2011-2015", "2016 onwards"), ordered = TRUE)
+
+myplot <- ggplot(filter(auc_dat, time != 0 & time < 11)) + geom_line(aes(x = time, y = auc, group = Year, color = Year, linetype = Year), size = 1.2) + theme_bw() + ylab("AUC for Conviction in Next Year") + xlab("Years Since Conviction") + theme(legend.position = "bottom", legend.title = element_blank()) + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(8)) + guides(color = guide_legend(nrow = 2)) + facet_wrap(~Model)
+
+myplot
+
+write_csv(auc_dat, paste0(output_file, "sfigure28_auc_year.csv"))
+```
+
+## Supplemental Figure 29: Calibration Stratified by Calendar Time
+
+```{r, echo = FALSE, results = "asis"}
+timepoints <- c(1,5)
+methods <- c("cox", "gbm", "cart")
+method_labs <- c("Cox", "GBM", "CART")
+calib_dat <- NULL
+
+load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+
+ test_dat$rg <- case_when(
+  test_dat$conv_year <= 1990 ~ "Pre-1990",
+  test_dat$conv_year > 1990 & test_dat$conv_year <=1995 ~ "1991-1995",
+  test_dat$conv_year > 1995 & test_dat$conv_year <= 2000 ~ "1996-2000",
+  test_dat$conv_year > 2000 & test_dat$conv_year <= 2005 ~ "2001-2005",
+  test_dat$conv_year > 2005 & test_dat$conv_year <= 2010 ~ "2006-2010",
+  test_dat$conv_year > 2010 & test_dat$conv_year <= 2015 ~ "2011-2015",
+  test_dat$conv_year > 2015 ~ "2016 onwards"
+)
+
+rg_group <- c("Pre-1990", "1991-1995", "1996-2000", "2001-2005", "2006-2010", "2011-2015", "2016 onwards")
+
+  
+  maxtime <- 10
+  mytimes <- c(1:maxtime)
+  
+  conditional_cox <- conditional_gbm <- conditional_cart <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+  for (i in 1:ncol(conditional_cox)){
+    if (i==1){
+      conditional_cox[,i] <- 1-cox_surv[,i]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]
+      conditional_cart[,i] <- 1-cart_preds[,i]
+    } else{
+      conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+      conditional_gbm[,i] <- 1-gbm_preds[,i]/gbm_preds[,(i-1)]
+      conditional_cart[,i] <- 1-cart_preds[,i]/cart_preds[,(i-1)]
+    }
+  }
+  
+  for (i in timepoints){
+  for (j in 1:length(methods)){
+    for (k in rg_group){
+      method <- methods[j]
+      label <- method_labs[j]
+      race_dat <- filter(test_dat, rg==k)
+     
+      if (length(which(test_dat$time_in_society > i & test_dat$rg==k)) < 100) next 
+      
+    if (method=="cox"){
+      race_dat$riskscore <- 1-conditional_cox[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    } else if (method=="gbm"){
+      race_dat$riskscore <- 1-conditional_gbm[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    } else if (method=="cart"){
+      race_dat$riskscore <- 1-conditional_cart[test_dat$rg==k & !is.na(test_dat$rg),i+1]
+    }
+    
+    sub_dat <- filter(race_dat, time_in_society > i) %>%
+      mutate(risk_group = as.numeric(cut(riskscore, breaks = unique(quantile(riskscore, 
+                                                               probs = seq(0, 1, 0.1),
+                                                               na.rm = TRUE)))))
+    
+    #Obtaining mean predicted risk within each decile:
+    calib_mean <- group_by(sub_dat, risk_group) %>% 
+      summarize(pred = mean(riskscore, na.rm = TRUE),
+                n = n()) %>%
+      filter(!is.na(risk_group)) %>%
+      rename(group = risk_group) %>%
+      mutate("Time" = paste0("Year ", i),
+             "Model" = label,
+             "Year" = k)
+
+    #Obtaining observed survival within each decile:
+    obs_model <- survfit(Surv(time_in_society, observed==1) ~ factor(risk_group), data = 
+                       sub_dat)
+
+    
+    survdat <- data.frame("time" = obs_model$time,
+                      "surv" = obs_model$surv,
+                      "risk_group" = rep(c(1:length(obs_model$strata)), times = obs_model$strata),
+                      "lower" = obs_model$lower,
+                      "upper" = obs_model$upper
+                      )
+
+    calib_o <- group_by(survdat, risk_group) %>%
+                summarize(obs = surv[max(which(time <= mytimes[i+1]))],
+                lower = lower[max(which(time <= mytimes[i+1]))],
+                upper = upper[max(which(time <= mytimes[i+1]))])
+
+    sub_calib <- left_join(calib_mean, calib_o, by = c("group" = "risk_group"))
+    
+    if (is.null(calib_dat)){
+      calib_dat <- sub_calib
+    } else{
+      calib_dat <- bind_rows(calib_dat, sub_calib)
+    }
+    }
+  }
+}
+
+  calib_dat <- filter(calib_dat, n > 20)
+  
+calib_dat$Year <- factor(calib_dat$Year, levels = c("Pre-1990", "1991-1995", "1996-2000", "2001-2005", "2006-2010", "2011-2015", "2016 onwards"), ordered = TRUE)
+
+#Creating calibration plot:
+myplot1 <- ggplot(data = filter(calib_dat, Time=="Year 1")) + geom_point(aes(x = 1-pred, y = 1-obs, color = Year), size = 1.5) + geom_line(aes(x = 1-pred, y = 1-obs, group = Year, color = Year, linetype = Year), size = 1.2) + geom_segment(aes(x = 1-pred, xend = 1-pred, y = 1-lower, yend = 1-upper, color = Year)) + theme_bw() +
+  facet_wrap(~Model) + xlab("Predicted Risk of Reoffending in Next Year, \nOne Year Post-Conviction") + ylab("Observed Risk of Reoffending in Next Year, \nOne Year Post-Conviction") + 
+  geom_abline(slope = 1, intercept = 0, color = "black") + 
+  theme(legend.position = "bottom") + theme(text = element_text(size = 12)) + scale_color_manual(values = viridis(8)) + guides(color = guide_legend(nrow = 2)) + coord_cartesian(xlim = c(0, 0.25), ylim = c(0, 0.25))
+
+myplot1
+
+calib_dat <- select(calib_dat, group, pred, Time, Model, Year, obs, lower, upper, n)
+
+write_csv(calib_dat, paste0(output_file, "sfigure29_calib_year.csv"))
+```
+
+## Supplemental Figure 30: Histogram of Risk Predictions
+
+```{r, echo = FALSE, results = "asis"}
+load(paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+
+maxtime <- 10
+mytimes <- c(1:10)
+
+#Obtaining risk predictions conditional on how much time has passed since the last offense:
+conditional_cox <- matrix(NA, nrow = nrow(cox_surv), ncol = ncol(cox_surv))
+
+for (i in 1:ncol(conditional_cox)){
+  if (i==1){
+    conditional_cox[,i] <- 1-cox_surv[,i]
+    } else{
+    conditional_cox[,i] <- 1-cox_surv[,i]/cox_surv[,(i-1)]
+    }
+}
+
+conditional_cox <- as.data.frame(conditional_cox)
+cox_preds <- pivot_longer(conditional_cox, cols = everything(), names_prefix = "V", names_to = "time", values_to = "pred")
+
+cox_preds2 <- cox_preds %>% 
+  mutate(risk_group = case_when(
+    pred < 0.01 ~ "0-1%",
+    pred >= 0.01 & pred < 0.015 ~ "1-1.5%",
+    pred >= 0.015 & pred < 0.02 ~ "1.5-2%",
+    pred >= 0.02 & pred < 0.025 ~ "2-2.5%",
+    pred >= 0.025 & pred < 0.03 ~ "2.5-3%",
+    pred >= 0.03 & pred < 0.035 ~ "3-3.5%",
+    pred >= 0.035 & pred < 0.04 ~ "3.5-4%",
+    pred >= 0.04 & pred < 0.045 ~ "4-4.5%",
+    pred >= 0.045 & pred < 0.05 ~ "4.5-5%",
+    pred >= 0.05 & pred < 0.06 ~ "5-6%",
+    pred >= 0.06 & pred < 0.075 ~ "6-7.5%",
+    pred >= 0.075 & pred < 0.1 ~ "7.5-10%",
+    pred >= 0.1 & pred < 0.25 ~ "10-25%",
+    pred >= 0.25 ~ "25-100%"
+  )) %>%
+  group_by(time, risk_group) %>%
+  summarize(n = n()) %>%
+  filter(n > 20) %>%
+  filter(time != "1")
+
+cox_preds2$timelabel <- paste0((as.numeric(cox_preds2$time)-1), " year(s) after conviction")
+
+cox_preds2$risk_group <- factor(cox_preds2$risk_group, levels = c("0-1%","1-1.5%","1.5-2%","2-2.5%","2.5-3%","3-3.5%","3.5-4%","4-4.5%","4.5-5%","5-6%", "6-7.5%", "7.5-10%","10-25%","25-100%"), ordered = TRUE)
+
+write_csv(cox_preds2, paste0(output_file, "sfigure30_risk_hist.csv"))
+
+myplot <- ggplot(data = cox_preds2) + geom_histogram(aes(x = risk_group, y = n), stat = "identity") + theme_bw() + xlab("Predicted Risk of Conviction in Next Year") + ylab("Number of Individuals") + theme(text = element_text(size = 12), axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + facet_wrap(~timelabel) 
+
+myplot
+```
+
+## Supplemental Table 4: Full Baseline Hazard of Full Cox Model
+
+```{r, echo = FALSE, results = "asis"}
+load('R:/research/data/all_states_sample.RData')
+
+train_dat <- filter(state_dat, assignment == "Training", time_in_society > 0)
+
+set.seed(123)
+train_dat <- group_by(train_dat, state) %>%
+  slice_sample(n = 50000) %>%
+  ungroup()
+
+train_dat$conv_year <- as.numeric(format(train_dat$adj_disp_dt, "%Y"))
+train_dat <- filter(train_dat, conv_year > 1950)
+
+n <- nrow(train_dat)
+
+load(paste0("R:/research/code/ElizabethFiles/Results/final_coxmodel.RData"))
+
+num_imps <- 5
+
+point_ests <- vector("list", num_imps)
+mytimes <- seq(0.1, 10, by = 0.1)
+for (i in 1:num_imps){
+  cumhaz_sub <- basehaz(myfit$analyses[[i]], centered = FALSE)
+  if (i == 1){
+    time_ids <- rep(NA, length(mytimes))
+    for (j in 1:length(mytimes)){
+      time_ids[j] <- max(which(cumhaz_sub$time <= mytimes[j]))
+    }
+  }
+  
+  point_ests[[i]] <- t(cumhaz_sub$hazard[time_ids])
+}
+
+cox_basecumhaz <- Reduce("+", point_ests)/length(point_ests)
+
+basecumhaz <- data.frame("time" = mytimes, "cumhaz" = t(cox_basecumhaz), "n" = n)
+
+write_csv(basecumhaz, paste0(output_file, "stable4_baseline_hazard.csv"))
+```
+
+## Supplemental Table 5: Full Baseline Hazard of Reduced Cox Model
+
+```{r, echo = FALSE, results = "asis"}
+load('R:/research/data/all_states_sample.RData')
+
+train_dat <- filter(state_dat, assignment == "Training", time_in_society > 0)
+
+set.seed(123)
+train_dat <- group_by(train_dat, state) %>%
+  slice_sample(n = 50000) %>%
+  ungroup()
+
+train_dat$conv_year <- as.numeric(format(train_dat$adj_disp_dt, "%Y"))
+train_dat <- filter(train_dat, conv_year > 1950)
+
+n <- nrow(train_dat)
+
+load(paste0("R:/research/code/ElizabethFiles/Results/cox_reduced.RData"))
+
+num_imps <- 5
+
+point_ests <- vector("list", num_imps)
+mytimes <- seq(0.1, 10, by = 0.1)
+for (i in 1:num_imps){
+  cumhaz_sub <- basehaz(myfit$analyses[[i]], centered = FALSE)
+  if (i == 1){
+    time_ids <- rep(NA, length(mytimes))
+    for (j in 1:length(mytimes)){
+      time_ids[j] <- max(which(cumhaz_sub$time <= mytimes[j]))
+    }
+  }
+  
+  point_ests[[i]] <- t(cumhaz_sub$hazard[time_ids])
+}
+
+cox_basecumhaz <- Reduce("+", point_ests)/length(point_ests)
+
+basecumhaz <- data.frame("time" = mytimes, "cumhaz" = t(cox_basecumhaz), "n" = n)
+
+write_csv(basecumhaz, paste0(output_file, "stable5_baseline_hazard_reduced.csv"))
+```

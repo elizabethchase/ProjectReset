@@ -1,0 +1,126 @@
+---
+title: "State Data Aggregation"
+author: "Elizabeth Chase"
+date: "2025-06-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(tidyverse)
+library(survival)
+library(tableone)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+library(survminer)
+library(pammtools)
+library(labelled)
+library(haven)
+
+#This function identifies the date of the most recent conviction of a particular type (e.g. felonies, violent offenses)
+last_felony <- function(date, type){
+  latest_fel <- rep(as.Date(NA_integer_), length(date))
+  curr_fel <- as.Date(NA_integer_)
+  for (j in 1:length(type)){
+    if (type[j] > 0){
+      curr_fel <- date[j]
+    } 
+    
+    latest_fel[j] <- curr_fel
+  }
+  return(latest_fel)
+}
+```
+
+This script aggregates the 7 state analytic files (created by data_clean.Rmd) into a single large analytic file.
+
+```{r, echo = FALSE, results = "asis"}
+states <- c("NC", "TX", "FL", "AZ", "WI", "MN", "OK")
+
+#setting filename template:
+state_subset_rds_template = 'R:/research/data/crim_hist_sample_%s.rds'
+
+#first loading NC data to start us off:
+load('R:\\research\\data\\crim_hist_sample_NC.rds')
+crim_hist_sample$state <- "NC"
+state_dat <- crim_hist_sample
+
+#looping over the other states:
+for (i in states[2:7]){
+  #reading in state subset:
+  my_rds = sprintf(state_subset_rds_template, i)
+  load(my_rds)
+  
+  #setting state ID:
+  crim_hist_sample$state <- i
+  
+  #binding to all state data:
+  state_dat <- bind_rows(state_dat, crim_hist_sample)
+}
+
+save(list = c("state_dat"), file = 'R:/research/data/all_states_sample.RData')
+
+#repeating this process for the felony-only files:
+state_subset_rds_template = 'R:/research/data/crim_hist_fel_sample_%s.rds'
+
+load('R:\\research\\data\\crim_hist_fel_sample_NC.rds')
+crim_hist_fel_sample$state <- "NC"
+state_dat_fel <- crim_hist_fel_sample
+
+for (i in states[2:7]){
+  my_rds = sprintf(state_subset_rds_template, i)
+  load(my_rds)
+  
+  crim_hist_fel_sample$state <- i
+  
+  state_dat_fel <- bind_rows(state_dat_fel, crim_hist_fel_sample)
+}
+
+save(list = c("state_dat_fel"), file = 'R:/research/data/all_states_sample_fel.RData')
+
+#repeating this process for the fully set of convictions (not the single sampled conviction:)
+state_rds_template = 'R:/research/data/crim_hist_%s.rds'
+
+load('R:\\research\\data\\crim_hist_NC.rds')
+crim_hist_final$state <- "NC"
+
+#identifying the date of last felony and last violent offense:
+crim_hist_final <- crim_hist_final %>% 
+    group_by(cjars_id) %>%
+    arrange(adj_disp_dt) %>% 
+    mutate(last_felony_date = as.Date(NA_integer_),
+           last_felony_date = last_felony(adj_disp_dt, n_felony),
+           last_viol_date = as.Date(NA_integer_),
+           last_viol_date = last_felony(adj_disp_dt, agg_date_violent)) %>%
+    select(cjars_id, adj_disp_dt, last_felony_date, last_viol_date)
+
+state_dat <- crim_hist_final
+
+#looping over the other states:
+for (i in states[2:7]){
+  my_rds2 = sprintf(state_rds_template, i)
+  
+  load(my_rds2)
+  
+  crim_hist_final <- crim_hist_final %>% 
+    group_by(cjars_id) %>%
+    arrange(adj_disp_dt) %>% 
+    mutate(last_felony_date = as.Date(NA_integer_),
+           last_felony_date = last_felony(adj_disp_dt, n_felony),
+           last_viol_date = as.Date(NA_integer_),
+           last_viol_date = last_felony(adj_disp_dt, agg_date_violent)) %>%
+    select(cjars_id, adj_disp_dt, last_felony_date, last_viol_date)
+  
+  state_dat <- bind_rows(state_dat, crim_hist_final)
+  
+}
+
+#now keeping only a single record for each ID x date combination, since some convictions appear in multiple state files:
+state_dat <- group_by(state_dat, cjars_id, adj_disp_dt) %>%
+  slice_sample(n = 1)
+
+ write_csv(state_dat, file = paste0("R:/research/code/ElizabethFiles/Results/last_fel_viol.csv"))
+```
+

@@ -1,0 +1,740 @@
+---
+title: "State Modeling"
+author: "Elizabeth Chase"
+date: "2025-06-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(survival)
+library(tableone)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+library(survminer)
+library(pammtools)
+library(labelled)
+library(latex2exp)
+library(BART)
+library(gbm)
+library(timeROC)
+library(mice)
+library(lattice)
+library(rpart)
+library(stringr)
+
+#loading data on all 7 states, but with only a single record per person:
+load('R:/research/data/all_states_sample.RData')
+
+#filtering to training data and individuals with > 0 follow-up:
+train_dat <- filter(state_dat, assignment == "Training", time_in_society > 0)
+
+#taking a sample of 50K from each state, so that states' contributions are equally weighted:
+set.seed(123)
+train_dat <- group_by(train_dat, state) %>%
+  slice_sample(n = 50000) %>%
+  ungroup()
+
+#calculating age at release from prison (or age at conviction, if there wasn't incarceration time):
+train_dat$age_at_release <- train_dat$age_at_date + (train_dat$inc_time_months/12)
+
+#centering age at 15 and dividing into decades:
+train_dat$age_center <- (train_dat$age_at_release-15)/10
+train_dat$firstconv_center <- (train_dat$firstconv_age-15)/10
+
+#obtaining year of conviction:
+train_dat$conv_year <- as.numeric(format(train_dat$adj_disp_dt, "%Y"))
+
+#restricting to convictions after 1950 (we keep a small number of old convictions if the person was released from prison during follow-up; this affects only a small number of convictions):
+train_dat <- filter(train_dat, conv_year > 1950)
+
+#setting times for evaluating predictive performance - annually out to 10 years:
+mytimes <- c(1:10)
+```
+
+Cleaning up validation data:
+
+```{r}
+#reading in information on the date of last felony and last violent offense:
+last_fel <- read_csv("R:/research/code/ElizabethFiles/Results/last_fel_viol.csv")
+
+#obtaining validation data:
+test_dat <- filter(state_dat, assignment == "Validation", time_in_society > 0)
+
+#taking a sample of size 20K from each state for the validation data:
+set.seed(123)
+test_dat <- group_by(test_dat, state) %>%
+  slice_sample(n = 20000) %>%
+  ungroup()
+
+#merging on information about date of last felony or last violent offense to the validation data:
+test_dat <- left_join(test_dat, last_fel, by = c("cjars_id", "adj_disp_dt"))
+
+rm(list = c("last_fel"))
+
+#calculating derived variables in the validation data:
+test_dat$age_at_release <- test_dat$age_at_date + (test_dat$inc_time_months/12)
+test_dat$firstconv_center <- (test_dat$firstconv_age-15)/10
+test_dat$age_center <- (test_dat$age_at_release-15)/10
+test_dat$age_sq <- test_dat$age_center^2
+test_dat$age_cat <- round(test_dat$age_at_release)
+test_dat$age_cat[test_dat$age_cat==15] <- 16
+test_dat$age_cat[test_dat$age_cat >= 65] <- 65
+test_dat$conv_year <- year(test_dat$adj_disp_dt)
+
+#restricting validation data to convictions after 1950:
+test_dat <- filter(test_dat, conv_year > 1950)
+
+test_dat$year_cat <- test_dat$conv_year
+test_dat$year_cat[test_dat$year_cat<= 1991] <- 1991
+
+test_sub <- select(test_dat, time_in_society, observed, n_felony, n_misd, n_prior_felony,
+                   n_prior_misd, age_center, age_sq, firstconv_center, agg_date_dui, agg_date_property,agg_date_drug, agg_date_criminal_traffic, agg_date_violent, agg_date_public_order, agg_prior_dui, agg_prior_property, agg_prior_drug, agg_prior_criminal_traffic, agg_prior_violent, agg_prior_public_order, inc_time_months, prison_spells_prior, inc_time_prior, conv_year, sex, race, state)
+
+#carrying out multiple imputation on the validation data using MICE with 5 imputations:
+num_imps <- 5
+ini <- mice(test_sub, maxit = 0, print = F)
+meth <- ini$meth
+meth["age_sq"] <- "~ I(age_center^2)"
+pred_mat <- ini$pred
+pred_mat["age_center", "age_sq"] <- 0
+
+impdat <- mice(test_sub, meth = meth, pred = pred_mat, maxit = 40, print = F, m = num_imps)
+
+imp_val <- complete(impdat, action = "long")
+```
+
+## Model generation
+
+Here's our current proposed Cox model (based on Shawn's predictors):
+
+```{r, echo = FALSE, results = "asis", fig.height = 8}
+train_dat$age_sq <- train_dat$age_center^2
+
+model1 <- coxph(Surv(time_in_society, as.numeric(observed==1))~ as.numeric(n_felony > 0) + as.numeric(n_misd > 0) + n_prior_felony + n_prior_misd + age_center + age_sq + firstconv_center + as.numeric(agg_date_dui > 0) + as.numeric(agg_date_property>0) + as.numeric(agg_date_drug>0) + as.numeric(agg_date_criminal_traffic>0) + as.numeric(agg_date_violent>0) + as.numeric(agg_date_public_order>0) + agg_prior_dui + agg_prior_property + agg_prior_drug + agg_prior_criminal_traffic + agg_prior_violent + agg_prior_public_order + inc_time_months + prison_spells_prior + inc_time_prior + age_center*as.numeric(n_felony > 0) + age_center*n_prior_felony + age_center*n_prior_misd + age_center*inc_time_prior, train_dat)
+
+summary(model1)
+
+coef_frame <- data.frame("Predictor" = c("Felony Count?", "Misdemeanor Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "Incarceration Time (months)", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*Felony Count?", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), 
+                         "HR" = summary(model1)$conf.int[,1],
+                         "Lower" = summary(model1)$conf.int[,4],
+                         "Upper" = summary(model1)$conf.int[,3])
+
+coef_frame$Predictor <- factor(coef_frame$Predictor, levels = c("Felony Count?", "Misdemeanor Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "Incarceration Time (months)", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*Felony Count?", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), ordered = TRUE)
+                         
+myplot <- ggplot(data = coef_frame) + geom_point(aes(x = Predictor, y = log(HR))) + geom_segment(aes(x = Predictor, xend = Predictor, y = log(Lower), yend = log(Upper))) + theme_bw() + geom_hline(yintercept = 0, color = "red", linetype = "dotted") + ylab("Hazard Ratio (95% CI)") + labs(caption = TeX(r'(Less likely to reoffend \leftarrow \rightarrow More likely to reoffend)')) + theme(plot.caption = element_text(hjust = 0.77)) + scale_x_discrete(limits = rev) + scale_y_continuous(breaks = log(c(0.2, 0.5, 0.8, 1, 1.2, 1.5, 1.8)), labels = c("0.2", "0.5", "0.9", "1", "1.2", "1.5", "1.8")) + coord_flip() + xlab(" ")
+
+myplot
+
+#ggsave(filename = "R:/research/code/ElizabethFiles/cox_plot.pdf", plot = myplot)
+```
+
+Here's a model including interactions between offense type and charge grade, per reviewer request:
+
+```{r, echo = FALSE, results = "asis"}
+model2 <- coxph(Surv(time_in_society, as.numeric(observed==1))~ as.numeric(n_felony > 0) + as.numeric(n_misd > 0) + n_prior_felony + n_prior_misd + age_center + age_sq + firstconv_center + as.numeric(agg_date_dui > 0) + as.numeric(agg_date_property>0) + as.numeric(agg_date_drug>0) + as.numeric(agg_date_criminal_traffic>0) + as.numeric(agg_date_violent>0) + as.numeric(agg_date_public_order>0) + inc_time_months + prison_spells_prior + inc_time_prior + agg_prior_dui_MI + agg_prior_property_FE + agg_prior_drug_FE + agg_prior_criminal_traffic_MI + agg_prior_violent_FE+ agg_prior_dui_FE + agg_prior_public_order_FE + agg_prior_public_order_MI + agg_prior_property_MI + agg_prior_violent_MI + agg_prior_criminal_traffic_FE + agg_prior_drug_MI + age_center*as.numeric(n_felony > 0) + age_center*n_prior_felony + age_center*n_prior_misd + age_center*inc_time_prior, train_dat)
+
+summary(model2)
+
+save(list = c("model2"), file = paste0("R:/research/code/ElizabethFiles/Results/coxmodel_int.RData"))
+```
+
+We refit the Cox model using multiple imputation, to address the small quantities of missing data in demographic information:
+
+```{r, echo = FALSE, results = "asis"}
+pred_sub <- select(train_dat, time_in_society, observed, n_felony, n_misd, n_prior_felony,
+                   n_prior_misd, age_center, age_sq, firstconv_center, agg_date_dui, agg_date_property,agg_date_drug, agg_date_criminal_traffic, agg_date_violent, agg_date_public_order, agg_prior_dui, agg_prior_property, agg_prior_drug, agg_prior_criminal_traffic, agg_prior_violent, agg_prior_public_order, inc_time_months, prison_spells_prior, inc_time_prior, conv_year, sex, race, state)
+
+good_ids <- which(complete.cases(pred_sub))
+
+md.pattern(pred_sub)
+
+#generating 5 imputations:
+num_imps <- 5
+ini <- mice(pred_sub, maxit = 0, print = F)
+meth <- ini$meth
+meth["age_sq"] <- "~ I(age_center^2)"
+pred_mat <- ini$pred
+pred_mat["age_center", "age_sq"] <- 0
+
+impdat <- mice(pred_sub, meth = meth, pred = pred_mat, maxit = 40, print = F, m = num_imps)
+
+save(list = c("impdat"), file = paste0("R:/research/code/ElizabethFiles/ImputeModels/allstate_imputations.RData"))
+#load(paste0("R:/research/code/ElizabethFiles/ImputeModels/allstate_imputations.RData"))
+
+plot(impdat)
+stripplot(impdat)
+
+#fitting the final Cox model on each imputation:
+myfit <- with(impdat, coxph(Surv(time_in_society, as.numeric(observed==1))~ as.numeric(n_felony > 0) + as.numeric(n_misd > 0) + n_prior_felony + n_prior_misd + age_center + age_sq + firstconv_center + as.numeric(agg_date_dui > 0) + as.numeric(agg_date_property>0) + as.numeric(agg_date_drug>0) + as.numeric(agg_date_criminal_traffic>0) + as.numeric(agg_date_violent>0) + as.numeric(agg_date_public_order>0) + agg_prior_dui + agg_prior_property + agg_prior_drug + agg_prior_criminal_traffic + agg_prior_violent + agg_prior_public_order + inc_time_months + prison_spells_prior + inc_time_prior + age_center*as.numeric(n_felony > 0) + age_center*n_prior_felony + age_center*n_prior_misd + age_center*inc_time_prior))
+
+#obtaining pooled estimates of the coefficients:
+pool.fit <- pool(myfit)
+
+coef_frame <- data.frame("Predictor" = c("Felony Count?", "Misdemeanor Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "Incarceration Time (months)", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*Felony Count?", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), 
+                         "HR" = exp(summary(pool.fit)$estimate),
+                         "Lower" = exp(summary(pool.fit)$estimate - 1.96*summary(pool.fit)$std.error),
+                         "Upper" = exp(summary(pool.fit)$estimate + 1.96*summary(pool.fit)$std.error))
+
+coef_frame$Predictor <- factor(coef_frame$Predictor, levels = c("Felony Count?", "Misdemeanor Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "Incarceration Time (months)", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*Felony Count?", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), ordered = TRUE)
+                         
+ggplot(data = coef_frame) + geom_point(aes(x = Predictor, y = log(HR))) + geom_segment(aes(x = Predictor, xend = Predictor, y = log(Lower), yend = log(Upper))) + theme_bw() + geom_hline(yintercept = 0, color = "red", linetype = "dotted") + ylab("Hazard Ratio (95% CI)") + labs(caption = TeX(r'(Less likely to reoffend \leftarrow \rightarrow More likely to reoffend)')) + theme(plot.caption = element_text(hjust = 0.77)) + scale_x_discrete(limits = rev) + scale_y_continuous(breaks = log(c(0.2, 0.5, 0.8, 1, 1.2, 1.5, 1.8)), labels = c("0.2", "0.5", "0.9", "1", "1.2", "1.5", "1.8")) + coord_flip() + xlab(" ")
+
+save(list = c("coef_frame", "myfit"), file = paste0("R:/research/code/ElizabethFiles/Results/final_coxmodel.RData"))
+
+#obtaining predicted survival curves for everyone in the validation data:
+
+#objects to store the predicted survival curves on each imputation:
+point_ests <- vector("list", num_imps)
+var_ests <- vector("list", num_imps)
+
+#looping over imputations:
+for (i in 1:num_imps){
+  #fitting the predicted cumulative hazard for this imputation:
+  thesepreds <- survfit(myfit$analyses[[i]], newdata = filter(imp_val, .imp==i))
+  #only keeping predictions at times c(1:10)
+  if (i == 1){
+    time_ids <- rep(NA, length(mytimes))
+    for (j in 1:length(mytimes)){
+      time_ids[j] <- max(which(thesepreds$time <= mytimes[j]))
+    }
+  }
+  
+  #storing point and variance estimates:
+  point_ests[[i]] <- t(thesepreds$cumhaz[time_ids,])
+  var_ests[[i]] <- t(thesepreds$std.err[time_ids,])^2
+}
+
+#obtaining the mean cumulative hazard pooled across imputations:
+cox_cumhaz <- Reduce("+", point_ests)/length(point_ests)
+
+#and its variance, per Rubin's rules:
+w_mat <- Reduce("+", var_ests)/length(var_ests)
+b_mat <- apply(simplify2array(point_ests), 1:2, var)
+cox_se <- sqrt(w_mat + ((num_imps + 1)/num_imps)*b_mat)
+
+#transforming the cumulative hazard to a survival curve:
+cox_surv <- exp(-1*cox_cumhaz)
+
+rm(list = c("b_mat", "coef_frame", "cox_cumhaz", "ini", "model1", "model2", "myplot", "point_ests", "pool.fit", "pred_mat", "pred_sub", "state_dat", "thesepreds", "var_ests", "w_mat", "year_plot", "time_ids"))
+```
+
+Fitting GBMS:
+
+```{r, echo = FALSE, results = "asis", include = FALSE}
+train_dat$age_cat <- round(train_dat$age_at_release)
+train_dat$age_cat[train_dat$age_cat==15] <- 16
+train_dat$age_cat[train_dat$age_cat >= 65] <- 65
+
+x.train <- select(train_dat, -cjars_id, -total_min_sent_time, -avg_min_sent_time, -total_max_sent_time, -avg_max_sent_time, -n_felony_cum, -n_misd_cum, -events_on_date, -events_cum, -events_before_date, -penalty_count_dwi, -sex, -race, -inc_entry_dt, -inc_exit_dt, -codes, -died_in_prison, -imputed, -num_incs, -entry_dates, -exit_dates, -from_prison, -prison_spells, -inc_time_cum, -ytime, -assignment, -age_center, -firstconv_center, -dob, -adj_disp_dt, -state, -conv_pre_start, -age_at_date, -age_at_release, -age_sq, -adj_disp_dt, -conv_year, -year_cat)
+
+x.train2 <- select(train_dat, -cjars_id, -total_min_sent_time, -avg_min_sent_time, -total_max_sent_time, -avg_max_sent_time, -n_felony_cum, -n_misd_cum, -events_on_date, -events_cum, -events_before_date, -penalty_count_dwi, -sex, -race, -inc_entry_dt, -inc_exit_dt, -codes, -died_in_prison, -imputed, -num_incs, -entry_dates, -exit_dates, -from_prison, -prison_spells, -inc_time_cum, -ytime, -assignment, -age_center, -firstconv_center, -dob, -adj_disp_dt, -state, -conv_pre_start, -age_at_date, -age_at_release, -age_sq, -adj_disp_dt, -year_cat, -conv_year, -ends_with("_UU"), -ends_with("_FE"), -ends_with("_MI"))
+
+#Fitting the GBM that includes the offense type x grade interactions:
+gbm_model <- gbm(Surv(time_in_society, observed==1) ~ ., data = x.train, distribution = "coxph", shrinkage = 0.01, interaction.depth = 2, n.trees = 10000, cv.folds = 5)
+
+save(list = c("gbm_model"), file = paste0('R:\\research\\code\\ElizabethFiles\\Results\\gbm_model_allstates_int.RData'))
+
+#Fitting the GBM without the offense type x grade interactions:
+gbm_model <- gbm(Surv(time_in_society, observed==1) ~ ., data = x.train2, distribution = "coxph", shrinkage = 0.01, interaction.depth = 2, n.trees = 10000, cv.folds = 5)
+
+save(list = c("gbm_model"), file = paste0('R:\\research\\code\\ElizabethFiles\\Results\\gbm_model_allstates.RData'))
+
+#load(paste0('R:\\research\\code\\ElizabethFiles\\Results\\gbm_model_allstates.RData'))
+
+best.iter <- gbm.perf(gbm_model, method = "cv")
+
+test <- summary(gbm_model, n.trees = best.iter)
+
+#storing information on influential predictors:
+label_map <- data.frame("var" = c("prison_spells_prior", "n_prior_misd", "n_prior_felony", "n_misd", "n_felony", "inc_time_prior", "inc_time_months", "firstconv_age", "agg_prior_violent", "agg_prior_unknown", "agg_prior_public_order", "agg_prior_property", "agg_prior_dui", "agg_prior_drug", "agg_prior_criminal_traffic", "agg_date_violent", "agg_date_unknown", "agg_date_public_order", "agg_date_property", "agg_date_dui", "agg_date_drug", "agg_date_criminal_traffic", "age_cat"),
+                        "label" = c("# Prior Prison Spells", "# Prior Misdemeanors", "# Prior Felonies", "# Misdemeanor Counts", "# Felony Counts", "Prior Incarceration Time", "Incarceration Time", "Age at First Conviction", "# Prior Violent Counts", "# Prior Unknown Counts", "# Prior Public Order Counts", "# Prior Property Counts", "# Prior DUI Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Violent Counts", "# Unknown Counts", "# Public Order Counts", "# Property Counts", "# DUI Counts", "# Drug Counts", "# Criminal Traffic Counts", "Age"))
+
+test <- left_join(test, label_map, by = c("var")) %>% arrange(rel.inf)
+
+test$label <- factor(test$label, levels = test$label, ordered = TRUE)
+
+save(list = c("test"), file = paste0("R:/research/code/ElizabethFiles/Results/allstate_gbm_importance.RData"))
+
+#obtaining predictions - first getting the baseline cumulative hazard:
+gbm_results <- predict(gbm_model, newdata = train_dat, n.trees = best.iter, type = "response")
+
+basehaz.cum <- basehaz.gbm(train_dat$time_in_society, train_dat$observed,
+                           gbm_results, t.eval = mytimes)
+
+#load(paste0('R:\\research\\code\\ElizabethFiles\\Results\\gbm_model_allstates.RData'))
+
+#now getting predictions for the validation data:
+gbm_results <- predict(gbm_model, newdata = test_dat, n.trees = best.iter, type = "response")
+
+#calculating the predicted survival curve for everyone in the validation data:
+gbm_preds <- matrix(NA, nrow = length(gbm_results), ncol = length(mytimes))
+
+for (i in 1:length(mytimes)){
+  gbm_preds[,i] <- exp(-exp(gbm_results)*basehaz.cum[i])
+}
+```
+
+```{r, echo = FALSE, results = "asis"}
+ggplot(data = test) + geom_histogram(aes(x = label, y = rel.inf), stat = "identity") + theme_bw() + coord_flip() + xlab(" ") + ylab("Relative Influence")
+```
+
+CART:
+
+```{r, echo = FALSE, results = "asis", include = FALSE}
+#Fitting the CART that includes the offense type x grade interactions:
+cart_model <- rpart(Surv(time_in_society, observed==1) ~ ., data = x.train, cp = 0.005)
+
+#save(list = c("cart_model"), file = paste0('R:\\research\\code\\ElizabethFiles\\Results\\cart_model_allstates_int.RData'))
+
+#Fitting the CART without the offense type x grade interactions:
+cart_model <- rpart(Surv(time_in_society, observed==1) ~ ., data = x.train2, cp = 0.0001)
+
+save(list = c("cart_model"), file = paste0('R:\\research\\code\\ElizabethFiles\\Results\\cart_model_allstates.RData'))
+
+#storing information on variable importance:
+imp_vars <- data.frame("var" = names(cart_model$variable.importance), "rel_inf" = cart_model$variable.importance)
+
+imp_vars <- left_join(imp_vars, label_map, by = c("var")) %>% arrange(rel_inf)
+
+imp_vars$label <- factor(imp_vars$label, levels = imp_vars$label, ordered = TRUE)
+
+save(list = c("imp_vars"), file = paste0("R:/research/code/ElizabethFiles/Results/allstate_cart_importance.RData"))
+
+#obtaining predicted survival curves for each classification group:
+fit_curve <- survfit(Surv(time_in_society, observed==1) ~ cart_model$where, data = x.train2)
+
+mycurve <- summary(fit_curve, times = mytimes)
+
+pred_km <- data.frame("time" = mycurve$time, "survival" = mycurve$surv, "class" = mycurve$strata) %>%
+  group_by(class) %>% 
+  arrange(time) %>%
+  mutate(cond_risk = 1-survival/lag(survival)) %>%
+  ungroup()
+
+pred_km2 <- filter(pred_km, time==5) %>% mutate(risk = 1-survival) %>% select(class, risk) %>%
+  mutate(class = as.numeric(str_extract_all(class, "\\d+\\.?\\d*")))
+
+x.train2$class <- cart_model$where
+
+x.train2 <- left_join(x.train2, pred_km2, by = c("class"))
+
+ggplot(data = imp_vars) + geom_histogram(aes(x = label, y = rel_inf), stat = "identity") + theme_bw() + coord_flip() + xlab(" ") + ylab("Variable Importance")
+
+#obtaining predictions for the validation data:
+newpreds <- predict(cart_model, newdata = test_dat)
+
+map <- data.frame("class" = paste0("cart_model$where=", unique(cart_model$where)), "pred" = cart_model$frame[unique(cart_model$where),"yval"])
+newpreds <- data.frame("pred" = newpreds)
+
+pred_km <- data.frame("time" = mycurve$time, "survival" = mycurve$surv, "class" = mycurve$strata) %>%
+  pivot_wider(names_from = time, values_from = survival)
+
+#merging on fitted survival curves to the predicted classifications:
+cart_preds <- left_join(newpreds, map, by = c("pred")) %>%
+  left_join(pred_km, by = c("class")) %>%
+  select(-pred, -class)
+
+#saving predictions from each of our models, and the validation data:
+save(list = c("test_dat", "cox_surv", "cox_se", "gbm_preds", "cart_preds"), file = paste0("R:/research/code/ElizabethFiles/Results/full_testpreds.RData"))
+```
+
+## State specific results
+
+```{r, echo = FALSE, results = "asis", include = FALSE}
+states <- c("NC", "WI", "OK", "TX", "FL", "MN", "AZ")
+
+#per reviewer request, we repeat the analysis above, but removing each state from the training data in turn, and then generating predictions in the held-out state:
+for (k in states){
+  #removing the state from the training data (and the imputed training data):
+  this_train <- filter(train_dat, state != k)
+  this_imp <- filter(impdat, state != k)
+  
+  x.train2 <- select(this_train, -cjars_id, -total_min_sent_time, -avg_min_sent_time, -total_max_sent_time, -avg_max_sent_time, -n_felony_cum, -n_misd_cum, -events_on_date, -events_cum, -events_before_date, -penalty_count_dwi, -sex, -race, -inc_entry_dt, -inc_exit_dt, -codes, -died_in_prison, -imputed, -num_incs, -entry_dates, -exit_dates, -from_prison, -prison_spells, -inc_time_cum, -ytime, -assignment, -age_center, -firstconv_center, -dob, -adj_disp_dt, -state, -conv_pre_start, -age_at_date, -age_at_release, -age_sq, -adj_disp_dt, -year_cat, -conv_year, -ends_with("_UU"), -ends_with("_FE"), -ends_with("_MI"))
+
+  #fitting Cox model:
+  myfit <- with(this_imp, coxph(Surv(time_in_society, as.numeric(observed==1))~ as.numeric(n_felony > 0) + as.numeric(n_misd > 0) + n_prior_felony + n_prior_misd + age_center + age_sq + firstconv_center + as.numeric(agg_date_dui > 0) + as.numeric(agg_date_property>0) + as.numeric(agg_date_drug>0) + as.numeric(agg_date_criminal_traffic>0) + as.numeric(agg_date_violent>0) + as.numeric(agg_date_public_order>0) + agg_prior_dui + agg_prior_property + agg_prior_drug + agg_prior_criminal_traffic + agg_prior_violent + agg_prior_public_order + inc_time_months + prison_spells_prior + inc_time_prior + age_center*as.numeric(n_felony > 0) + age_center*n_prior_felony + age_center*n_prior_misd + age_center*inc_time_prior))
+
+save(list = c("myfit"), file = paste0("R:/research/code/ElizabethFiles/Results/coxmodel_no", k, ".RData"))
+
+#getting Cox model predictions on the held-out state's validation data:
+point_ests <- vector("list", num_imps)
+var_ests <- vector("list", num_imps)
+
+for (i in 1:num_imps){
+  thesepreds <- survfit(myfit$analyses[[i]], newdata = filter(imp_val, .imp==i, state == k))
+  if (i == 1){
+    time_ids <- rep(NA, length(mytimes))
+    for (j in 1:length(mytimes)){
+      time_ids[j] <- max(which(thesepreds$time <= mytimes[j]))
+    }
+  }
+  
+  point_ests[[i]] <- t(thesepreds$cumhaz[time_ids,])
+  var_ests[[i]] <- t(thesepreds$std.err[time_ids,])^2
+}
+
+cox_cumhaz <- Reduce("+", point_ests)/length(point_ests)
+w_mat <- Reduce("+", var_ests)/length(var_ests)
+b_mat <- apply(simplify2array(point_ests), 1:2, var)
+cox_se <- sqrt(w_mat + ((num_imps + 1)/num_imps)*b_mat)
+
+cox_surv <- exp(-1*cox_cumhaz)
+
+  #fitting GBM:
+  gbm_model <- gbm(Surv(time_in_society, observed==1) ~ ., data = x.train2, distribution = "coxph", shrinkage = 0.01, interaction.depth = 2, n.trees = 10000, cv.folds = 5)
+
+save(list = c("gbm_model"), file = paste0('R:\\research\\code\\ElizabethFiles\\Results\\gbm_model_no', k, '.RData'))
+
+#obtaining predictions from the GBM on the held-out state validation data:
+best.iter <- gbm.perf(gbm_model, method = "cv")
+
+gbm_results <- predict(gbm_model, newdata = x.train2, n.trees = best.iter, type = "response")
+
+basehaz.cum <- basehaz.gbm(x.train2$time_in_society, x.train2$observed,
+                           gbm_results, t.eval = mytimes)
+
+gbm_results <- predict(gbm_model, newdata = filter(test_dat, state == k), n.trees = best.iter, type = "response")
+
+gbm_preds <- matrix(NA, nrow = length(gbm_results), ncol = length(mytimes))
+
+for (i in 1:length(mytimes)){
+  gbm_preds[,i] <- exp(-exp(gbm_results)*basehaz.cum[i])
+}
+
+  #fitting CART:
+  cart_model <- rpart(Surv(time_in_society, observed==1) ~ ., data = x.train2, cp = 0.0001)
+
+save(list = c("cart_model"), file = paste0('R:\\research\\code\\ElizabethFiles\\Results\\cart_model_no', k, '.RData'))
+
+fit_curve <- survfit(Surv(time_in_society, observed==1) ~ cart_model$where, data = x.train2)
+
+mycurve <- summary(fit_curve, times = mytimes)
+
+pred_km <- data.frame("time" = mycurve$time, "survival" = mycurve$surv, "class" = mycurve$strata) %>%
+  pivot_wider(names_from = time, values_from = survival)
+
+newpreds <- predict(cart_model, newdata = filter(test_dat, state == k))
+
+map <- data.frame("class" = paste0("cart_model$where=", unique(cart_model$where)), "pred" = cart_model$frame[unique(cart_model$where),"yval"])
+newpreds <- data.frame("pred" = newpreds)
+cart_preds <- left_join(newpreds, map, by = c("pred")) %>%
+  left_join(pred_km, by = c("class")) %>%
+  select(-pred, -class)
+
+this_test <- filter(test_dat, state == k)
+
+save(list = c("this_test", "cox_surv", "cox_se", "gbm_preds", "cart_preds"), file = paste0("R:/research/code/ElizabethFiles/Results/testpreds_no, ", k, ".RData"))
+
+}
+```
+
+## Model with race and sex included
+
+```{r, echo = FALSE, results = "asis", include = FALSE}
+x.train2 <- select(train_dat, -cjars_id, -total_min_sent_time, -avg_min_sent_time, -total_max_sent_time, -avg_max_sent_time, -n_felony_cum, -n_misd_cum, -events_on_date, -events_cum, -events_before_date, -penalty_count_dwi, -inc_entry_dt, -inc_exit_dt, -codes, -died_in_prison, -imputed, -num_incs, -entry_dates, -exit_dates, -from_prison, -prison_spells, -inc_time_cum, -ytime, -assignment, -age_center, -firstconv_center, -dob, -adj_disp_dt, -state, -conv_pre_start, -age_at_date, -age_at_release, -age_sq, -adj_disp_dt, -year_cat, -conv_year, -ends_with("_UU"), -ends_with("_FE"), -ends_with("_MI"))
+
+imp_long <- complete(impdat, action = 'long', include = TRUE)
+imp_long$race_agg <- case_when(
+  imp_long$race==1 ~ "NH White",
+  imp_long$race==2 ~ "NH Black",
+  imp_long$race==3 | imp_long$race==5 | imp_long$race==6 ~ "Other race",
+  imp_long$race==4 ~ "Hispanic"
+)
+
+impdat2 <- as.mids(imp_long)
+
+#fitting a variant of the Cox model where we interact all predictors with race and sex:
+myfit <- with(impdat2, coxph(Surv(time_in_society, as.numeric(observed==1))~ as.numeric(n_felony > 0) + as.numeric(n_misd > 0) + n_prior_felony + n_prior_misd + age_center + age_sq + firstconv_center + as.numeric(agg_date_dui > 0) + as.numeric(agg_date_property>0) + as.numeric(agg_date_drug>0) + as.numeric(agg_date_criminal_traffic>0) + as.numeric(agg_date_violent>0) + as.numeric(agg_date_public_order>0) + agg_prior_dui + agg_prior_property + agg_prior_drug + agg_prior_criminal_traffic + agg_prior_violent + agg_prior_public_order + inc_time_months + prison_spells_prior + inc_time_prior + race_agg + factor(sex) + age_center*as.numeric(n_felony > 0) + age_center*n_prior_felony + age_center*n_prior_misd + age_center*inc_time_prior + race_agg*as.numeric(n_misd > 0) + race_agg*n_prior_felony + race_agg*n_prior_misd + race_agg*age_center + race_agg*age_sq + race_agg*agg_prior_dui + race_agg*agg_prior_property + race_agg*agg_prior_violent + race_agg*agg_prior_public_order + factor(sex)*n_prior_felony + factor(sex)*n_prior_misd + factor(sex)*age_center + factor(sex)*age_sq + factor(sex)*firstconv_center + factor(sex)*as.numeric(agg_date_dui > 0) + factor(sex)*as.numeric(agg_date_property>0) + factor(sex)*as.numeric(agg_date_drug>0) + factor(sex)*as.numeric(agg_date_criminal_traffic>0) + factor(sex)*as.numeric(agg_date_violent>0) + factor(sex)*as.numeric(agg_date_public_order>0) + factor(sex)*agg_prior_dui + factor(sex)*agg_prior_property + factor(sex)*agg_prior_drug + factor(sex)*agg_prior_criminal_traffic + factor(sex)*agg_prior_violent + factor(sex)*agg_prior_public_order + factor(sex)*inc_time_months + factor(sex)*prison_spells_prior + factor(sex)*race_agg))
+
+pool.fit <- pool(myfit)
+
+outputs <- summary(pool.fit)
+write_csv(outputs, paste0("R:/research/code/ElizabethFiles/Results/race_sex_cox.csv"))
+
+#getting predictions from this race-sex-included Cox model:
+imp_val$race_agg <- case_when(
+  imp_val$race==1 ~ "NH White",
+  imp_val$race==2 ~ "NH Black",
+  imp_val$race==3 | imp_val$race==5 | imp_val$race==6 ~ "Other race",
+  imp_val$race==4 ~ "Hispanic"
+)
+
+point_ests <- vector("list", num_imps)
+
+for (i in 1:num_imps){
+  thesepreds <- survfit(myfit$analyses[[i]], newdata = filter(imp_val, .imp==i))
+  if (i == 1){
+    time_ids <- rep(NA, length(mytimes))
+    for (j in 1:length(mytimes)){
+      time_ids[j] <- max(which(thesepreds$time <= mytimes[j]))
+    }
+  }
+  
+  point_ests[[i]] <- t(thesepreds$cumhaz[time_ids,])
+}
+
+cox_cumhaz <- Reduce("+", point_ests)/length(point_ests)
+cox_surv <- exp(-1*cox_cumhaz)
+
+  #fitting GBM with race/sex information:
+  gbm_model <- gbm(Surv(time_in_society, observed==1) ~ ., data = x.train2, distribution = "coxph", shrinkage = 0.01, interaction.depth = 2, n.trees = 10000, cv.folds = 5)
+
+save(list = c("gbm_model"), file = paste0('R:\\research\\code\\ElizabethFiles\\Results\\gbm_model_racesex.RData'))
+
+best.iter <- gbm.perf(gbm_model, method = "cv")
+
+gbm_results <- predict(gbm_model, newdata = x.train2, n.trees = best.iter, type = "response")
+
+basehaz.cum <- basehaz.gbm(x.train2$time_in_society, x.train2$observed,
+                           gbm_results, t.eval = mytimes)
+
+gbm_results <- predict(gbm_model, newdata = test_dat, n.trees = best.iter, type = "response")
+
+gbm_preds <- matrix(NA, nrow = length(gbm_results), ncol = length(mytimes))
+
+for (i in 1:length(mytimes)){
+  gbm_preds[,i] <- exp(-exp(gbm_results)*basehaz.cum[i])
+}
+
+  #fitting CART with race/sex information:
+  cart_model <- rpart(Surv(time_in_society, observed==1) ~ ., data = x.train2, cp = 0.0001)
+
+save(list = c("cart_model"), file = paste0('R:\\research\\code\\ElizabethFiles\\Results\\cart_model_racesex.RData'))
+
+fit_curve <- survfit(Surv(time_in_society, observed==1) ~ cart_model$where, data = x.train2)
+
+mycurve <- summary(fit_curve, times = mytimes)
+
+pred_km <- data.frame("time" = mycurve$time, "survival" = mycurve$surv, "class" = mycurve$strata) %>%
+  pivot_wider(names_from = time, values_from = survival)
+
+newpreds <- predict(cart_model, newdata = filter(test_dat, state == k))
+
+map <- data.frame("class" = paste0("cart_model$where=", unique(cart_model$where)), "pred" = cart_model$frame[unique(cart_model$where),"yval"])
+newpreds <- data.frame("pred" = newpreds)
+cart_preds <- left_join(newpreds, map, by = c("pred")) %>%
+  left_join(pred_km, by = c("class")) %>%
+  select(-pred, -class)
+
+this_test <- filter(test_dat, state == k)
+
+save(list = c("test_dat", "cox_surv", "gbm_preds", "cart_preds"), file = paste0("R:/research/code/ElizabethFiles/Results/testpreds_racesex.RData"))
+```
+ 
+## Reduced model
+
+```{r, echo = FALSE, results = "asis", include = FALSE}
+#fitting a reduced model that doesn't include incarceration or crime type predictors:
+myfit <- with(impdat, coxph(Surv(time_in_society, as.numeric(observed==1))~ as.numeric(n_felony > 0) + as.numeric(n_misd > 0) + n_prior_felony + n_prior_misd + age_center + age_sq + firstconv_center + age_center*as.numeric(n_felony > 0) + age_center*n_prior_felony + age_center*n_prior_misd))
+
+pool.fit <- pool(myfit)
+
+coef_frame <- data.frame("Predictor" = c("Felony Count?", "Misdemeanor Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "Age*Felony Count?", "Age*# Prior Felonies", "Age*# Prior Misdemeanors"),
+                         "HR" = exp(summary(pool.fit)$estimate),
+                         "Lower" = exp(summary(pool.fit)$estimate - 1.96*summary(pool.fit)$std.error),
+                         "Upper" = exp(summary(pool.fit)$estimate + 1.96*summary(pool.fit)$std.error))
+
+coef_frame$Predictor <- factor(coef_frame$Predictor, levels = c("Felony Count?", "Misdemeanor Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "Age*Felony Count?", "Age*# Prior Felonies", "Age*# Prior Misdemeanors"), ordered = TRUE)
+                         
+save(list = c("coef_frame", "myfit"), file = paste0("R:/research/code/ElizabethFiles/Results/cox_reduced.RData"))
+
+#getting predictions from the reduced model:
+point_ests <- vector("list", num_imps)
+
+for (i in 1:num_imps){
+  thesepreds <- survfit(myfit$analyses[[i]], newdata = filter(imp_val, .imp==i))
+  if (i == 1){
+    time_ids <- rep(NA, length(mytimes))
+    for (j in 1:length(mytimes)){
+      time_ids[j] <- max(which(thesepreds$time <= mytimes[j]))
+    }
+  }
+  
+  point_ests[[i]] <- t(thesepreds$cumhaz[time_ids,])
+}
+
+cox_cumhaz <- Reduce("+", point_ests)/length(point_ests)
+cox_surv <- exp(-1*cox_cumhaz)
+
+save(list = c("test_dat", "cox_surv"), file = paste0("R:/research/code/ElizabethFiles/Results/testpreds_reduced.RData"))
+```
+
+## Felony only models
+
+```{r, echo = FALSE, results = "asis"}
+#refitting the models using data that only considers felony convictions:
+load('R:/research/data/all_states_sample_fel.RData')
+
+train_dat <- filter(state_dat_fel, assignment == "Training", time_in_society > 0)
+
+set.seed(123)
+train_dat <- group_by(train_dat, state) %>%
+  slice_sample(n = 50000) %>%
+  ungroup()
+
+train_dat$age_at_release <- train_dat$age_at_date + (train_dat$inc_time_months/12)
+train_dat$age_center <- (train_dat$age_at_release-15)/10
+train_dat$firstconv_center <- (train_dat$firstconv_age-15)/10
+train_dat$conv_year <- as.numeric(format(train_dat$adj_disp_dt, "%Y"))
+
+train_dat <- filter(train_dat, conv_year > 1950)
+
+train_dat$age_sq <- train_dat$age_center^2
+train_dat$age_sq <- train_dat$age_center^2
+
+train_dat$age_cat <- round(train_dat$age_at_release)
+train_dat$age_cat[train_dat$age_cat==15] <- 16
+train_dat$age_cat[train_dat$age_cat >= 65] <- 65
+
+pred_sub <- select(train_dat, time_in_society, observed, n_felony, n_misd, n_prior_felony,
+                   n_prior_misd, age_center, age_sq, firstconv_center, agg_date_dui, agg_date_property,agg_date_drug, agg_date_criminal_traffic, agg_date_violent, agg_date_public_order, agg_prior_dui, agg_prior_property, agg_prior_drug, agg_prior_criminal_traffic, agg_prior_violent, agg_prior_public_order, inc_time_months, prison_spells_prior, inc_time_prior, conv_year, sex, race, state)
+
+num_imps <- 5
+ini <- mice(pred_sub, maxit = 0, print = F)
+meth <- ini$meth
+meth["age_sq"] <- "~ I(age_center^2)"
+pred_mat <- ini$pred
+pred_mat["age_center", "age_sq"] <- 0
+
+impdat <- mice(pred_sub, meth = meth, pred = pred_mat, maxit = 40, print = F, m = num_imps)
+
+save(list = c("impdat"), file = paste0("R:/research/code/ElizabethFiles/ImputeModels/felonly_imputations.RData"))
+
+test_dat <- filter(state_dat_fel, assignment == "Validation", time_in_society > 0)
+
+set.seed(123)
+test_dat <- group_by(test_dat, state) %>%
+  slice_sample(n = 20000) %>%
+  ungroup()
+
+test_dat$age_at_release <- test_dat$age_at_date + (test_dat$inc_time_months/12)
+test_dat$firstconv_center <- (test_dat$firstconv_age-15)/10
+test_dat$age_center <- (test_dat$age_at_release-15)/10
+test_dat$age_sq <- test_dat$age_center^2
+test_dat$age_cat <- round(test_dat$age_at_release)
+test_dat$age_cat[test_dat$age_cat==15] <- 16
+test_dat$age_cat[test_dat$age_cat >= 65] <- 65
+test_dat$conv_year <- year(test_dat$adj_disp_dt)
+
+test_dat <- filter(test_dat, conv_year > 1950)
+
+test_sub <- select(test_dat, time_in_society, observed, n_felony, n_misd, n_prior_felony,
+                   n_prior_misd, age_center, age_sq, firstconv_center, agg_date_dui, agg_date_property,agg_date_drug, agg_date_criminal_traffic, agg_date_violent, agg_date_public_order, agg_prior_dui, agg_prior_property, agg_prior_drug, agg_prior_criminal_traffic, agg_prior_violent, agg_prior_public_order, inc_time_months, prison_spells_prior, inc_time_prior, conv_year, sex, race, state)
+
+num_imps <- 5
+ini <- mice(test_sub, maxit = 0, print = F)
+meth <- ini$meth
+meth["age_sq"] <- "~ I(age_center^2)"
+pred_mat <- ini$pred
+pred_mat["age_center", "age_sq"] <- 0
+
+impdat <- mice(test_sub, meth = meth, pred = pred_mat, maxit = 40, print = F, m = num_imps)
+
+imp_val <- complete(impdat, action = "long")
+
+myfit <- with(impdat, coxph(Surv(time_in_society, as.numeric(observed==1))~ as.numeric(n_felony > 0) + as.numeric(n_misd > 0) + n_prior_felony + n_prior_misd + age_center + age_sq + firstconv_center + as.numeric(agg_date_dui > 0) + as.numeric(agg_date_property>0) + as.numeric(agg_date_drug>0) + as.numeric(agg_date_criminal_traffic>0) + as.numeric(agg_date_violent>0) + as.numeric(agg_date_public_order>0) + agg_prior_dui + agg_prior_property + agg_prior_drug + agg_prior_criminal_traffic + agg_prior_violent + agg_prior_public_order + inc_time_months + prison_spells_prior + inc_time_prior + age_center*as.numeric(n_felony > 0) + age_center*n_prior_felony + age_center*n_prior_misd + age_center*inc_time_prior))
+
+pool.fit <- pool(myfit)
+
+coef_frame <- data.frame("Predictor" = c("Felony Count?", "Misdemeanor Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "Incarceration Time (months)", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*Felony Count?", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), 
+                         "HR" = exp(summary(pool.fit)$estimate),
+                         "Lower" = exp(summary(pool.fit)$estimate - 1.96*summary(pool.fit)$std.error),
+                         "Upper" = exp(summary(pool.fit)$estimate + 1.96*summary(pool.fit)$std.error))
+
+coef_frame$Predictor <- factor(coef_frame$Predictor, levels = c("Felony Count?", "Misdemeanor Count?", "# Prior Felonies", "# Prior Misdemeanors", "Age at Release (per 10 years, centered at 15)", "Age^2 (per 10 years, centered at 15)", "Age at First Conviction (per 10 years, centered at 15)", "DUI Count?", "Property Count?", "Drug Count?", "Criminal Traffic Count?", "Violent Count?", "Public Order Count?", "# Prior DUI Counts", "# Prior Property Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Prior Violent Counts", "# Prior Public Order Counts", "Incarceration Time (months)", "# Prior Prison Spells", "Prior Incarceration Time (months)", "Age*Felony Count?", "Age*# Prior Felonies", "Age*# Prior Misdemeanors", "Age*Prior Incarceration Time (months)"), ordered = TRUE)
+                         
+ggplot(data = coef_frame) + geom_point(aes(x = Predictor, y = log(HR))) + geom_segment(aes(x = Predictor, xend = Predictor, y = log(Lower), yend = log(Upper))) + theme_bw() + geom_hline(yintercept = 0, color = "red", linetype = "dotted") + ylab("Hazard Ratio (95% CI)") + labs(caption = TeX(r'(Less likely to reoffend \leftarrow \rightarrow More likely to reoffend)')) + theme(plot.caption = element_text(hjust = 0.77)) + scale_x_discrete(limits = rev) + scale_y_continuous(breaks = log(c(0.2, 0.5, 0.8, 1, 1.2, 1.5, 1.8)), labels = c("0.2", "0.5", "0.9", "1", "1.2", "1.5", "1.8")) + coord_flip() + xlab(" ")
+
+save(list = c("coef_frame", "myfit"), file = paste0("R:/research/code/ElizabethFiles/Results/felonly_coxmodel.RData"))
+
+point_ests <- vector("list", num_imps)
+var_ests <- vector("list", num_imps)
+
+for (i in 1:num_imps){
+  thesepreds <- survfit(myfit$analyses[[i]], newdata = filter(imp_val, .imp==i))
+  if (i == 1){
+    time_ids <- rep(NA, length(mytimes))
+    for (j in 1:length(mytimes)){
+      time_ids[j] <- max(which(thesepreds$time <= mytimes[j]))
+    }
+  }
+  
+  point_ests[[i]] <- t(thesepreds$cumhaz[time_ids,])
+  var_ests[[i]] <- t(thesepreds$std.err[time_ids,])^2
+}
+
+cox_cumhaz <- Reduce("+", point_ests)/length(point_ests)
+w_mat <- Reduce("+", var_ests)/length(var_ests)
+b_mat <- apply(simplify2array(point_ests), 1:2, var)
+cox_se <- sqrt(w_mat + ((num_imps + 1)/num_imps)*b_mat)
+
+cox_surv <- exp(-1*cox_cumhaz)
+
+x.train2 <- select(train_dat, -cjars_id, -total_min_sent_time, -avg_min_sent_time, -total_max_sent_time, -avg_max_sent_time, -n_felony_cum, -n_misd_cum, -events_on_date, -events_cum, -events_before_date, -penalty_count_dwi, -sex, -race, -inc_entry_dt, -inc_exit_dt, -codes, -died_in_prison, -imputed, -num_incs, -entry_dates, -exit_dates, -from_prison, -prison_spells, -inc_time_cum, -ytime, -assignment, -age_center, -firstconv_center, -dob, -adj_disp_dt, -state, -conv_pre_start, -age_at_date, -age_at_release, -age_sq, -adj_disp_dt, -conv_year, -ends_with("_UU"), -ends_with("_FE"), -ends_with("_MI"))
+
+#Fitting the GBM without the offense type x grade interactions:
+gbm_model <- gbm(Surv(time_in_society, observed==1) ~ ., data = x.train2, distribution = "coxph", shrinkage = 0.01, interaction.depth = 2, n.trees = 10000, cv.folds = 5)
+
+save(list = c("gbm_model"), file = paste0('R:\\research\\code\\ElizabethFiles\\Results\\gbm_model_felonly.RData'))
+
+best.iter <- gbm.perf(gbm_model, method = "cv")
+
+test <- summary(gbm_model, n.trees = best.iter)
+
+label_map <- data.frame("var" = c("prison_spells_prior", "n_prior_misd", "n_prior_felony", "n_misd", "n_felony", "inc_time_prior", "inc_time_months", "firstconv_age", "agg_prior_violent", "agg_prior_unknown", "agg_prior_public_order", "agg_prior_property", "agg_prior_dui", "agg_prior_drug", "agg_prior_criminal_traffic", "agg_date_violent", "agg_date_unknown", "agg_date_public_order", "agg_date_property", "agg_date_dui", "agg_date_drug", "agg_date_criminal_traffic", "age_cat"),
+                        "label" = c("# Prior Prison Spells", "# Prior Misdemeanors", "# Prior Felonies", "# Misdemeanor Counts", "# Felony Counts", "Prior Incarceration Time", "Incarceration Time", "Age at First Conviction", "# Prior Violent Counts", "# Prior Unknown Counts", "# Prior Public Order Counts", "# Prior Property Counts", "# Prior DUI Counts", "# Prior Drug Counts", "# Prior Criminal Traffic Counts", "# Violent Counts", "# Unknown Counts", "# Public Order Counts", "# Property Counts", "# DUI Counts", "# Drug Counts", "# Criminal Traffic Counts", "Age"))
+
+test <- left_join(test, label_map, by = c("var")) %>% arrange(rel.inf)
+
+test$label <- factor(test$label, levels = test$label, ordered = TRUE)
+
+save(list = c("test"), file = paste0("R:/research/code/ElizabethFiles/Results/felonly_gbm_importance.RData"))
+
+ggplot(data = test) + geom_histogram(aes(x = label, y = rel.inf), stat = "identity") + theme_bw() + coord_flip() + xlab(" ") + ylab("Relative Influence")
+
+gbm_results <- predict(gbm_model, newdata = train_dat, n.trees = best.iter, type = "response")
+
+basehaz.cum <- basehaz.gbm(train_dat$time_in_society, train_dat$observed,
+                           gbm_results, t.eval = mytimes)
+
+gbm_results <- predict(gbm_model, newdata = test_dat, n.trees = best.iter, type = "response")
+
+gbm_preds <- matrix(NA, nrow = length(gbm_results), ncol = length(mytimes))
+
+for (i in 1:length(mytimes)){
+  gbm_preds[,i] <- exp(-exp(gbm_results)*basehaz.cum[i])
+}
+
+#Fitting the CART without the offense type x grade interactions:
+cart_model <- rpart(Surv(time_in_society, observed==1) ~ ., data = x.train2, cp = 0.0001)
+
+save(list = c("cart_model"), file = paste0('R:\\research\\code\\ElizabethFiles\\Results\\cart_model_felonly.RData'))
+
+summary(cart_model)
+par(mar = rep(0.2,4))
+plot(cart_model)
+text(cart_model)
+
+fit_curve <- survfit(Surv(time_in_society, observed==1) ~ cart_model$where, data = x.train2)
+
+mycurve <- summary(fit_curve, times = mytimes)
+
+pred_km <- data.frame("time" = mycurve$time, "survival" = mycurve$surv, "class" = mycurve$strata) %>%
+  pivot_wider(names_from = time, values_from = survival)
+
+newpreds <- predict(cart_model, newdata = test_dat)
+
+map <- data.frame("class" = paste0("cart_model$where=", unique(cart_model$where)), "pred" = cart_model$frame[unique(cart_model$where),"yval"])
+newpreds <- data.frame("pred" = newpreds)
+cart_preds <- left_join(newpreds, map, by = c("pred")) %>%
+  left_join(pred_km, by = c("class")) %>%
+  select(-pred, -class)
+
+save(list = c("test_dat", "cox_surv", "cox_se", "gbm_preds", "cart_preds"), file = paste0("R:/research/code/ElizabethFiles/Results/felonly_testpreds.RData"))
+```
+
+

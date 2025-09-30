@@ -1,0 +1,777 @@
+---
+title: "CJARS Data Assembly"
+author: "Elizabeth Chase"
+date: "2025-06-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(survival)
+
+source("R:/research/code/useful_local_functions.R")
+
+#Identify which state's data will be cleaned (options: NC, AZ, WI, OK, TX, FL, MN)
+state_id = "WI"
+
+show_diagnostics = F
+
+#Load file names for the demographic, incarceration, and adjudication files from CJARS:
+demographic_nc_rds = paste0('R:\\research\\data\\dem_clean_',state_id, '_subset.rds')
+incarceration_nc_rds = paste0('R:\\research\\data\\inc_', state_id, '_subset.rds')
+adjudication_nc_rds = paste0('R:\\research\\data\\adj_', state_id, '_subset.rds')
+
+#Read them in:
+demo_nc = read_rds(demographic_nc_rds)
+adj_nc = read_rds(adjudication_nc_rds)
+inc_nc = read_rds(incarceration_nc_rds)
+
+#For each state, set:
+
+#1) inc_start_date: the starting date for keeping incarceration records - for most states this is Jan. 1, 1900, but not for NC due to changes in how they handled parole
+
+#2) start_date: the starting date for sampling eligible conviction records - this is when the state begins providing all misdemeanor/felony convictions and incarcerations to CJARS
+
+#3) last_observed_date: the end of follow-up for conviction records - this is when the state stops providing all misdemeanor/felony convictions and incarcerations to CJARS
+
+#4) escapee_date: this is one year prior to last_observed_date; if someone escapes from prison within the last year of follow-up, they are set to still be in prison until the end of follow-up - we assume they aren't applying for jobs within a year of escaping from prison
+
+if (state_id=="NC"){
+  inc_start_date = as.Date("1996-01-01")
+  start_date = as.Date("2011-01-01")
+  last_observed_date = as.Date("2020-12-31")
+  escapee_date = as.Date("2019-12-31")
+} else if (state_id=="WI"){
+  inc_start_date = as.Date("1900-01-01")
+  start_date = as.Date("2000-01-01")
+  last_observed_date = as.Date("2019-12-31")
+  escapee_date = as.Date("2018-12-31")
+} else if (state_id=="AZ"){
+  inc_start_date = as.Date("1900-01-01")
+  start_date = as.Date("1997-01-01")
+  last_observed_date = as.Date("2020-12-31")
+  escapee_date = as.Date("2018-12-31")
+} else if (state_id=="FL"){
+  inc_start_date = as.Date("1900-01-01")
+  start_date = as.Date("2005-01-01")
+  last_observed_date = as.Date("2021-12-31")
+  escapee_date = as.Date("2019-12-31")
+} else if (state_id=="TX"){
+  inc_start_date = as.Date("1900-01-01")
+  start_date = as.Date("1992-01-01")
+  last_observed_date = as.Date("2012-12-31")
+  escapee_date = as.Date("2016-12-31")
+} else if (state_id=="MN"){
+  inc_start_date = as.Date("1900-01-01")
+  start_date = as.Date("2009-01-01")
+  last_observed_date = as.Date("2021-12-31")
+  escapee_date = as.Date("2019-12-31")
+} else if (state_id=="OK"){
+  inc_start_date = as.Date("1900-01-01")
+  start_date = as.Date("2000-01-01")
+  last_observed_date = as.Date("2017-12-31")
+  escapee_date = as.Date("2014-12-31")
+}
+
+#Setting some filenames for output files:
+crim_history_rds = paste0('R:\\research\\data\\crim_hist_', state_id, '.rds')
+crim_history_sample = paste0('R:\\research\\data\\crim_hist_sample_', state_id, '.rds')
+crim_history_fel_rds = paste0('R:\\research\\data\\crim_hist_fel', state_id, '.rds')
+crim_history_fel_sample = paste0('R:\\research\\data\\crim_hist_fel_sample_', state_id, '.rds')
+```
+
+This script cleans the raw CJARS data into our analytic files, for all 7 states. First, we clean up the adjudication and incarceration codes:
+
+```{r}
+#setting labels for adjudication codes:
+adj_disp_codes = tribble(
+  ~code, ~disposition,
+  'ND', 'dismissal',
+  'NU', 'not_guilty',
+  'NM', 'mistrial',
+  'NI', 'insanity',
+  'NA', 'acquittal',
+  'NP', 'not_guilty_plea',
+  'DU', 'diversion',
+  'UU', 'unknown',
+  'PU', 'procedural',
+  'PT', 'transfer',
+  'GU', 'guilty',
+  'GP', 'guilty_plea',
+  'GC', 'guilty_court',
+  'GJ', 'guilty_jury') |> 
+  arrange(code)
+
+#identifying the codes that correspond to a guilty disposition:
+keep_codes = adj_disp_codes |> 
+  filter(grepl("^guilty", disposition))
+
+#labeling offense type codes:
+disp_type_codes = tribble(
+  ~adj_disp_type, ~disp_type,
+  '1', 'violent',
+  '2', 'property',
+  '3', 'drug',
+  '4', 'dui',
+  '5', 'public_order',
+  '6', 'criminal_traffic',
+  '8', 'not_applicable',
+  '9', 'unknown')
+
+#labeling incarceration exit codes:
+inc_exit_codes = tribble(
+  ~inc_exit_cd, ~exit_code,
+    'PD',  'Parole Board Decision',
+    'MR',  'Mandatory Parole Release',
+    'PR',  'Probation Release',
+    'OR',  'Other Conditional Release',
+    'ES',  'Expiration of Sentence',
+    'CP',  'Commutation/Pardon',
+    'RC',  'Release to Custody, Detainer, Warrant',
+    'UR',  'Other Unconditional Release',
+    'DN',  'Death, Natural Causes',
+    'SU',  'Suicide',
+    'HI',  'Homicide by Another Inmate',
+    'OH',  'Other Homicide',
+    'EX',  'Execution',
+    'TR',  'Other Death',
+    'RA',  'Transfer',
+    'OT',  'Release on Appeal or Bond Other',
+    'EA',  'Escape/AWOL',
+    'AI',  'Accidental Injury to Self',
+    'IE',  'Illegal Entry',
+    'UU',  'Not Known / Missing')
+
+# labeling a coarser grouping of incarceration exit codes:
+inc_exit_categories = tribble(
+  ~inc_exit_cd, ~inc_exit_category,
+    'PD',  'release',
+    'MR',  'release',
+    'PR',  'release',
+    'OR',  'release',
+    'ES',  'release',
+    'CP',  'release',
+    'RC',  'release',
+    'UR',  'release',
+    'DN',  'death',
+    'SU',  'death',
+    'HI',  'death',
+    'OH',  'death',
+    'EX',  'death',
+    'TR',  'death',
+    'RA',  'unknown',
+    'OT',  'release',
+    'EA',  'unknown',
+    'AI',  'unknown',
+    'IE',  'unknown',
+    'UU',  'unknown')
+```
+
+First, we clean up the adjudication data:
+
+```{r}
+adj_nc_almost_thin = adj_nc |> 
+  # Drop life sentences (-88888) and death sentences (-99999) but keep NAs:
+  filter(adj_sent_inc_min >= 0 | is.na(adj_sent_inc_min)) |>
+  #only keep guilty verdicts:
+  filter(adj_disp_cd %in% keep_codes$code) |> 
+  #clean up offense codes and disposition dates:
+    mutate(
+      adj_disp_type = substr(adj_disp_off_cd, 1, 1),
+    adj_disp_dt = parse_date(x = paste(adj_disp_dt_yyyy, adj_disp_dt_mm, adj_disp_dt_dd, sep = '-'), 
+                           format = '%Y-%m-%d'),
+    adj_sent_dt = parse_date(x = paste(adj_sent_dt_yyyy, adj_sent_dt_mm, adj_sent_dt_dd, sep = '-'), 
+                          format = '%Y-%m-%d')) |> 
+  filter(!is.na(adj_disp_dt)) |> # remove records without a disposition date; we can't use them
+    left_join(disp_type_codes, by = "adj_disp_type") |> 
+  select(cjars_id, adj_id, disp_type, adj_grd_cd, adj_disp_dt, 
+         adj_sent_dt, adj_sent_inc_min, adj_sent_inc_max) 
+
+#writing a function to group convictions into 30-day non-rolling criminal episodes
+assign_event_dates = function(disp_dt){
+   # If there is only one conviction for an individual, then the episode date is the conviction date: 
+  if(length(disp_dt) == 1) return(disp_dt)
+  
+  #setting one month threshold:
+  group_time_span = 1/12 # 1/12 = one month.
+  
+  #setting output vector of episode dates - currently NA:
+  ev_dt = rep(as.Date(NA_integer_), length(disp_dt))
+  
+  # If there are multiple convictions for an individual, then loop over convictions:
+  for(i in 1:length(disp_dt)){
+    if(i == 1) {
+      # Take the first date outright.  
+      ev_dt[i] = disp_dt[i]
+      # Initialize the keep_date variable.
+      keep_date = disp_dt[i]
+    } else {
+     # If the current date is outside the range of the keep date + our interval, assign a new keep date.
+      if (fractional_year(disp_dt[i]) > (fractional_year(keep_date) + group_time_span)){
+        keep_date = disp_dt[i]
+        ev_dt[i] = keep_date
+      } else {
+        # Otherwise, carry the keep date forward.
+        ev_dt[i] = keep_date
+      }
+    }
+  }
+  
+  return(ev_dt)
+}
+
+#applying the function to obtain episode dates:
+new_disp_dt = adj_nc_almost_thin |>
+  add_count(cjars_id) |> 
+  group_by(cjars_id) |> 
+  arrange(adj_disp_dt) |> 
+  mutate(
+    event_dt = as.Date(NA_integer_), # Pre-allocate for the "for" loop.
+    event_dt = assign_event_dates(adj_disp_dt)) |>
+  ungroup() |>
+  select(cjars_id, adj_id, adj_disp_dt = event_dt)
+  
+#merging on episode date:
+adj_nc_thin = adj_nc_almost_thin |> 
+  rename(old_adj_disp_dt = adj_disp_dt) |> 
+  left_join(new_disp_dt, by = c("cjars_id", "adj_id"))
+
+#counting number of convictions on each episode date, and prior convictions:
+events_on_date = adj_nc_thin |> 
+  count(cjars_id, adj_disp_dt, name = "events_on_date") |> 
+  arrange(cjars_id, adj_disp_dt) |> 
+  group_by(cjars_id) |> 
+  mutate(
+    events_cum = cumsum(events_on_date),
+    events_before_date = lag(events_cum, default = 0)
+    ) |> 
+  ungroup() |> 
+  #merging on demographic information:
+  left_join(demo_nc, by = "cjars_id") |> 
+   #calculating age at conviction:
+  mutate(age_at_date = fractional_year(adj_disp_dt) - fractional_year(dob)) 
+
+#if age at conviction is outside of 15-100, set it to NA:
+events_on_date$age_at_date[events_on_date$age_at_date < 15 | events_on_date$age_at_date > 100] <- NA
+
+#identifying the IDs of individuals with implausible/missing DOB info:
+bad_ids <- unique(events_on_date$cjars_id[is.na(events_on_date$age_at_date)])
+
+#for these individuals with implausible DOB, set all of their DOB and age at conviction info to NA:
+events_on_date$dob[events_on_date$cjars_id %in% bad_ids] <- NA
+events_on_date$age_at_date[events_on_date$cjars_id %in% bad_ids] <- NA
+
+#identify the age at first conviction:
+firstconv = events_on_date |> 
+  group_by(cjars_id) |> 
+  arrange(adj_disp_dt) |> 
+  slice(1) |> # Take the first one
+  ungroup() |> 
+  rename(firstconv_age = age_at_date) |> 
+  select(cjars_id, firstconv_age)
+
+#calculate number of felony and misdemeanor convictions at each episode and cumulatively:
+adj_counts = adj_nc_thin |> 
+  arrange(cjars_id, adj_disp_dt) |> 
+  mutate(felony = as.integer(adj_grd_cd == "FE"),
+         misd = as.integer(adj_grd_cd == "MI")) |> 
+  group_by(cjars_id, adj_disp_dt) |> 
+  summarize(n_felony = sum(felony), 
+            n_misd = sum(misd),
+            .groups = "drop") |> 
+  group_by(cjars_id) |> 
+  arrange(adj_disp_dt) |> 
+  mutate(
+    # n_convictions = 1:n(), # This could be higher than n_felony + n_misd due to UU.
+         n_felony_cum = cumsum(n_felony),
+         n_misd_cum = cumsum(n_misd),
+         n_prior_felony = lag(n_felony_cum, default = 0),
+         n_prior_misd = lag(n_misd_cum, default = 0)) |> 
+  ungroup()
+    
+#calculate sentencing time recommendations for each episode:     
+sent_time = adj_nc_thin |> 
+ group_by(cjars_id, adj_disp_dt) |>
+  summarize(
+         total_min_sent_time = sum(adj_sent_inc_min, na.rm = TRUE),
+         avg_min_sent_time = mean(adj_sent_inc_min, na.rm = TRUE),
+         total_max_sent_time = sum(adj_sent_inc_max, na.rm = TRUE),
+         avg_max_sent_time = mean(total_max_sent_time, na.rm =TRUE),
+  .groups = "drop")
+
+#calculating number of offenses by crime type, both for each episode and cumulatively:
+agg_counts = adj_nc_thin |> 
+  count(cjars_id, adj_disp_dt, disp_type, name = "agg_date") |> 
+  group_by(cjars_id, disp_type) |>
+  arrange(adj_disp_dt) |>
+  mutate(
+    agg_prior_cum = cumsum(agg_date),
+    agg_prior = lag(agg_prior_cum, default = 0)) |>
+  ungroup() |> 
+  select(-agg_prior_cum) |> 
+  pivot_wider(names_from = disp_type, values_from = c(agg_date, agg_prior)) |> 
+  group_by(cjars_id) |> 
+  arrange(adj_disp_dt) |> 
+  fill(starts_with("agg_prior"), .direction = "downup") |> 
+  ungroup() |> 
+  mutate(across(starts_with("agg_"), .fns = ~replace_na(.x, replace = 0)),
+         penalty_count_dwi = agg_date_dui > 0)
+
+#at request of reviewer, calculating the number of offenses grouped by grade and crime type, both at each episode and cumulatively:
+agg_counts2 = adj_nc_thin |> 
+  mutate(disp_type2 = paste0(disp_type, "_", adj_grd_cd)) |>
+  count(cjars_id, adj_disp_dt, disp_type2, name = "agg_date") |> 
+  group_by(cjars_id, disp_type2) |>
+  arrange(adj_disp_dt) |>
+  mutate(
+    agg_prior_cum = cumsum(agg_date),
+    agg_prior = lag(agg_prior_cum, default = 0)) |>
+  ungroup() |> 
+  select(-agg_prior_cum) |> 
+  pivot_wider(names_from = disp_type2, values_from = c(agg_date, agg_prior)) |> 
+  group_by(cjars_id) |> 
+  arrange(adj_disp_dt) |> 
+  fill(starts_with("agg_prior"), .direction = "downup") |> 
+  ungroup() |> 
+  mutate(across(starts_with("agg_"), .fns = ~replace_na(.x, replace = 0)))
+
+#merging all of these component pieces together:
+adj_summary = sent_time |> 
+  left_join(adj_counts, by = c("cjars_id", "adj_disp_dt")) |>
+  left_join(events_on_date, by = c("cjars_id", "adj_disp_dt")) |> 
+  left_join(firstconv, by = c("cjars_id")) |> 
+  left_join(agg_counts, by = c("cjars_id", "adj_disp_dt")) |>
+  left_join(agg_counts2, by = c("cjars_id", "adj_disp_dt"))
+```
+
+Now cleaning incarceration data:
+
+```{r}
+inc_nc_thin = inc_nc |> 
+  #only keep incarcerations that correspond to individuals in the adjudication file:
+ filter(cjars_id %in% unique(adj_nc_thin$cjars_id)) |>
+ mutate(
+   #cleaning up incarceration date info:
+    inc_entry_dt = parse_date(x = paste(inc_entry_dt_yyyy, inc_entry_dt_mm, inc_entry_dt_dd, sep = '-'), 
+                           format = '%Y-%m-%d'),
+    inc_exit_dt = parse_date(x = paste(inc_exit_dt_yyyy, inc_exit_dt_mm, inc_exit_dt_dd, sep = '-'), 
+                          format = '%Y-%m-%d')) |> 
+  left_join(inc_exit_categories, by = "inc_exit_cd") |> 
+  select(cjars_id, inc_id, inc_entry_dt, inc_exit_dt, inc_exit_cd, inc_exit_category)|>
+  #removing incarcerations that don't have an entry date, because we can't use these:
+  filter(!is.na(inc_entry_dt)) |>
+  #restricting to incarcerations that occurred during our follow-up period:
+  filter(inc_entry_dt >= inc_start_date, inc_entry_dt < last_observed_date)
+
+#Updating incarceration exit date for individuals still believed to be in prison:
+inc_nc_thin$inc_exit_dt[is.na(inc_nc_thin$inc_exit_dt) & inc_nc_thin$inc_exit_cd=="UU"] <- last_observed_date
+
+#Dealing with escapees:
+inc_nc_thin$inc_exit_dt[inc_nc_thin$inc_exit_dt > escapee_date & inc_nc_thin$inc_exit_cd=="EA"] <- last_observed_date
+
+#Making a first attempt at matching incarcerations to adjudications, for the purposes of imputation
+adj_timeline <- select(adj_nc_thin, cjars_id, adj_disp_dt) %>%
+  rename(date = adj_disp_dt) %>%
+  mutate(type = "adj")
+
+inc_entry <- select(inc_nc_thin, cjars_id, inc_entry_dt) %>%
+  rename(date = inc_entry_dt) %>%
+  mutate(type = "inc_entry")
+
+adj_inc <- bind_rows(adj_timeline, inc_entry) %>%
+  filter(cjars_id %in% unique(inc_nc_thin$cjars_id)) %>%
+  arrange(cjars_id, date, type)
+
+#writing a function to identify the most recent conviction and apply it to all subsequent incarcerations until the next conviction:
+nearest_adj <- function(date, type){
+  latest_adj <- rep(as.Date(NA_integer_), length(date))
+  curr_adj <- as.Date(NA_integer_)
+  for (i in 1:length(type)){
+    if (type[i]=="adj"){
+      curr_adj <- date[i]
+    } 
+    
+    latest_adj[i] <- curr_adj
+  }
+  return(latest_adj)
+}
+
+#applying this function to identify the most recent conviction for each incarceration:
+inc_first_match <- adj_inc %>%
+  group_by(cjars_id) %>%
+  arrange(date, type) %>%
+  mutate(adj_match = as.Date(NA_integer_),
+         adj_match = nearest_adj(date, type)) %>%
+  ungroup() %>%
+  arrange(cjars_id, date, type) %>%
+  filter(type=="inc_entry")
+
+inc_backbone <- left_join(inc_nc_thin, inc_first_match, by = c("cjars_id", "inc_entry_dt" = "date"))
+
+#merging conviction info onto the incarceration file so we can use these predictors for imputation:
+inc_for_impute <- left_join(inc_backbone, adj_summary, by = c("cjars_id", "adj_match" = "adj_disp_dt"))
+
+#setting incarceration exit date to NA if it comes before the entry date:
+inc_for_impute$inc_exit_dt[inc_for_impute$inc_exit_dt <= inc_for_impute$inc_entry_dt] <- as.Date(NA_integer_)
+
+#Pulling out incarcerations that have no matching conviction, i.e. they occurred before the first conviction in our data:
+pre_record <- filter(inc_for_impute, is.na(n_misd))
+
+#keeping incarcerations that occurred after convictions in our data:
+inc_for_impute <- filter(inc_for_impute, !is.na(n_misd))
+
+#filtering to the incarcerations that are missing an exit date:
+needs_impute <- filter(inc_for_impute, is.na(inc_exit_dt))
+
+#filtering to the incarcerations that have an exit date, which we will use to build the imputation model:
+make_model <- filter(inc_for_impute, !is.na(inc_exit_dt))
+
+#creating a censoring indicator for whether the person exited incarceration:
+make_model$event <- ifelse(make_model$inc_exit_category=="death", 2, ifelse(make_model$inc_exit_dt==last_observed_date, 0, 1))
+
+#calculating length of incarceration:
+make_model$event_time <- make_model$inc_exit_dt-make_model$inc_entry_dt
+
+#fitting a Cox PH model for length of incarceration conditional on conviction characteristics, criminal record, and demographics:
+inc_model <- coxph(Surv(event_time, as.numeric(event==1)) ~ total_min_sent_time + n_felony + n_misd + n_prior_felony + n_prior_misd + age_at_date + factor(sex) + factor(race), data = make_model)
+
+#fitting a 2nd Cox PH model that doesn't use demographic info (since some people are missing this):
+inc_model_nodemo <- coxph(Surv(event_time, as.numeric(event==1)) ~ total_min_sent_time + n_felony + n_misd + n_prior_felony + n_prior_misd, data = make_model)
+
+#saving incarceration imputation models:
+save(list = c("inc_model", "inc_model_nodemo"), file = paste0('R:\\research\\code\\ElizabethFiles\\impute_model_', state_id, '.RData'))
+
+#identifying the IDs for incarcerations that need an imputed exit date but that are missing demographic info:
+bad_ids <- which((is.na(needs_impute$inc_exit_category) | needs_impute$inc_exit_category != "death") & (is.na(needs_impute$age_at_date) | is.na(needs_impute$sex) | is.na(needs_impute$race)))
+
+#identifying the IDs for incarcerations that need an imputed exit date but that are not missing demographic info:
+inc_ids <- which(is.na(needs_impute$inc_exit_category) | needs_impute$inc_exit_category != "death" & (!is.na(needs_impute$age_at_date) & !is.na(needs_impute$sex) & !is.na(needs_impute$race)))
+
+#identifying incarcerations that ended in death:
+dead_ids <- which(needs_impute$inc_exit_category=="death")
+
+#obtaining the median incarceration length imputation for incarcerations that aren't missing demographic info:
+inc_preds <- survfit(inc_model, newdata = needs_impute[inc_ids,])
+
+extract_med_survival <- function(probs, time){
+  time[min(which(probs <= 0.5))]
+}
+
+inc_predicted <- apply(X = inc_preds$surv, MARGIN = 2, FUN = extract_med_survival, time = inc_preds$time)
+
+#obtaining the median incarceration length imputation for incarcerations that are missing demographic info:
+if (length(bad_ids) > 0){
+  inc_preds_nodemo <- survfit(inc_model_nodemo, newdata = needs_impute[bad_ids,])
+}
+
+if (length(bad_ids)>1){
+  inc_predicted_nodemo <- apply(X = inc_preds_nodemo$surv, MARGIN = 2, FUN = extract_med_survival, time = inc_preds_nodemo$time)
+} else if (length(bad_ids)==1){
+  inc_predicted_nodemo <- inc_preds_nodemo$time[min(which(inc_preds_nodemo$surv <= 0.5))]
+} else {
+  inc_predicted_nodemo <- NULL
+}
+
+needs_impute$prediction <- NA_integer_
+needs_impute$prediction[inc_ids] <- inc_predicted
+needs_impute$prediction[bad_ids] <- inc_predicted_nodemo
+
+#calculating incarceration exit date using imputations:
+needs_impute$inc_exit_dt <- needs_impute$inc_entry_dt + needs_impute$prediction
+needs_impute$inc_exit_dt[dead_ids] <- last_observed_date
+
+#creating flag for whether incarceration exit date was imputed:
+needs_impute$imputed <- 1
+needs_impute <- select(needs_impute, -prediction)
+make_model$imputed <- 0
+make_model <- select(make_model, -event, -event_time)
+
+#truncating incarceration exit dates that were imputed to be after the end of follow-up; setting them to the last follow-up date:
+imputed_inc_match <- bind_rows(make_model, needs_impute) %>%
+  mutate(trunctime = last_observed_date) %>%
+  mutate(inc_exit_dt = pmin(inc_exit_dt, trunctime))
+
+#Filtering out adjudications that happened during incarceration
+adj_timeline <- select(adj_nc_thin, cjars_id, adj_disp_dt) %>%
+  rename(date = adj_disp_dt) %>%
+  mutate(type = "adj")
+
+inc_entry <- select(imputed_inc_match, cjars_id, inc_entry_dt) %>%
+  rename(date = inc_entry_dt) %>%
+  mutate(type = "inc_entry")
+
+inc_exit <- select(imputed_inc_match, cjars_id, inc_exit_dt) %>%
+  rename(date = inc_exit_dt) %>%
+  mutate(type = "inc_exit")
+
+pre_rec_entry <- filter(pre_record, !is.na(inc_entry_dt), !is.na(inc_exit_dt)) %>%
+  select(cjars_id, inc_entry_dt) %>%
+  rename(date = inc_entry_dt) %>%
+  mutate(type = "inc_entry")
+
+pre_rec_exit <- filter(pre_record, !is.na(inc_entry_dt), !is.na(inc_exit_dt)) %>%
+  select(cjars_id, inc_exit_dt) %>%
+  rename(date = inc_exit_dt) %>%
+  mutate(type = "inc_exit")
+
+inc_ids <- unique(c(imputed_inc_match$cjars_id, pre_record$cjars_id))
+
+timeline_dat <- bind_rows(adj_timeline, inc_entry, inc_exit, pre_rec_entry, pre_rec_exit) %>%
+  filter(!is.na(date), cjars_id %in% inc_ids) %>%
+  arrange(cjars_id, date, type)
+
+#writing a function to identify if someone is in prison:
+adj_in_prison <- function(type){
+  in_prison <- rep(NA, length(type))
+  prison_ind <- 0
+  for (i in 1:length(type)){
+    if (type[i]=="inc_entry"){
+      prison_ind <- prison_ind + 1
+    } else if (type[i]=="inc_exit"){
+      prison_ind <- prison_ind - 1
+    }
+    
+    in_prison[i] <- prison_ind
+  }
+  return(in_prison)
+}
+
+#identifying convictions that occurred in prison:
+in_prison_ind <- timeline_dat %>%
+  group_by(cjars_id) %>%
+  arrange(date, type) %>%
+  mutate(in_prison = NA_real_,
+         in_prison = adj_in_prison(type)) %>%
+  ungroup() %>%
+  arrange(cjars_id, date, type) %>%
+  filter(in_prison >= 1 & type =="adj") %>%
+  distinct()
+  
+#removing convictions that occurred in-prison from the conviction file:
+adj_summary <- left_join(adj_summary, in_prison_ind, by = c("cjars_id", "adj_disp_dt" = "date")) %>% filter(is.na(in_prison))
+
+#Re-matching incarcerations to nearest adjudication after removing adjudications in prison
+adj_timeline <- select(adj_summary, cjars_id, adj_disp_dt) %>%
+  rename(date = adj_disp_dt) %>%
+  mutate(type = "adj")
+
+inc_entry <- select(imputed_inc_match, cjars_id, inc_entry_dt) %>%
+  rename(date = inc_entry_dt) %>%
+  mutate(type = "inc_entry")
+
+adj_inc <- bind_rows(adj_timeline, inc_entry) %>%
+  filter(cjars_id %in% unique(imputed_inc_match$cjars_id)) %>%
+  arrange(cjars_id, date, type)
+
+inc_first_match <- adj_inc %>%
+  group_by(cjars_id) %>%
+  arrange(date, type) %>%
+  mutate(adj_match_final = as.Date(NA_integer_),
+         adj_match_final = nearest_adj(date, type)) %>%
+  ungroup() %>%
+  arrange(cjars_id, date, type) %>%
+  filter(type=="inc_entry")
+
+inc_backbone <- left_join(imputed_inc_match, inc_first_match, by = c("cjars_id", "inc_entry_dt" = "date")) %>% 
+  select(cjars_id, inc_id, inc_entry_dt, inc_exit_dt, adj_match_final, imputed, inc_exit_cd, inc_exit_category) 
+
+more_pre_record <- filter(inc_backbone, is.na(adj_match_final)) %>% select(cjars_id, inc_id, inc_entry_dt, inc_exit_dt)
+
+#assembling final incarceration file and grouping incarcerations by criminal episode date:
+inc_backbone <- inc_backbone %>%
+  mutate(entry_char = as.character(inc_entry_dt),
+         exit_char = as.character(inc_exit_dt)) %>%
+  group_by(cjars_id) %>%
+  mutate(died_in_prison = if_else(inc_exit_dt == max(inc_exit_dt) & inc_exit_category=="death", 1, 0)) %>%
+  ungroup() %>%
+  group_by(cjars_id, adj_match_final) %>%
+  arrange(inc_entry_dt) %>%
+  summarize(inc_entry_dt = min(inc_entry_dt), 
+            inc_exit_dt = max(inc_exit_dt),
+            codes = paste0(inc_exit_cd, collapse = ","),
+            died_in_prison = max(died_in_prison), 
+            imputed = paste0(imputed, collapse = ","),
+            num_incs = n(),
+            entry_dates = paste0(entry_char, collapse = ","),
+            exit_dates = paste0(exit_char, collapse = ",")) %>%
+  mutate(from_prison = 1) 
+
+pre_record2 <- select(pre_record, cjars_id, inc_id, inc_entry_dt, inc_exit_dt) %>% bind_rows(more_pre_record) %>% distinct()
+
+#Dealing with convictions pre-record:
+pre_record3 <- pre_record2 %>%
+  mutate(inc_time_months = (fractional_year(inc_exit_dt) - fractional_year(inc_entry_dt))*12) %>%
+  group_by(cjars_id) %>%
+  summarize(pre_inc_time = sum(inc_time_months, na.rm = TRUE),
+            pre_spells = n())
+
+```
+
+Creating final dataset:
+
+```{r}
+#merging conviction and incarceration data:
+crim_hist = adj_summary |>
+  left_join(inc_backbone, by = c("cjars_id", "adj_disp_dt" = "adj_match_final")) |>
+  replace_na(list(died_in_prison = 0)) |>
+  group_by(cjars_id) |> 
+  arrange(adj_disp_dt) |> 
+  fill(c(starts_with("n_prior"), starts_with("agg_prior"), starts_with("events_before_"), 
+         ends_with("_cum"), ends_with("_prior")), .direction = "up") |> 
+  ungroup() %>%
+  select(-type, -in_prison)
+  
+#calculating time incarcerated in month; restricting to convictions that occurred before the end of follow-up:
+crim_hist_final0 <- crim_hist |>
+    mutate(inc_time_months = (fractional_year(inc_exit_dt) - fractional_year(adj_disp_dt))*12) |>
+    replace_na(list(from_prison = 0, 
+                    inc_time_months = 0,
+                    num_incs = 0)) |>
+    filter(adj_disp_dt <= last_observed_date) 
+
+#calculating censoring indicator and cumulative incarceration info; calculating follow-up time:
+crim_hist_final_all <- crim_hist_final0 |>
+    group_by(cjars_id) |> 
+    arrange(adj_disp_dt) |> 
+    mutate(adj_disp_dt_frac = fractional_year(adj_disp_dt),
+      observed = if_else(adj_disp_dt == max(adj_disp_dt), 0, 1),
+      prison_spells = cumsum(from_prison),
+      prison_spells_prior = lag(prison_spells, default = 0),
+      inc_time_cum = cumsum(inc_time_months),
+      inc_time_prior = lag(inc_time_cum, default = 0),
+      ytime = lead(adj_disp_dt_frac) - adj_disp_dt_frac) |>
+    ungroup() |> 
+    mutate(ytime = if_else(is.na(ytime), 
+                           fractional_year(last_observed_date)-adj_disp_dt_frac,
+                           ytime),
+         observed = if_else(died_in_prison > 0, 2, observed)) |>
+    select(-adj_disp_dt_frac) |>
+  #restricting to convictions that occurred in our follow-up window or that kept the person incarcerated until the start of follow-up
+  filter(adj_disp_dt >= start_date | (!is.na(inc_exit_dt) & inc_exit_dt >= start_date)) |>
+  mutate(conv_pre_start = adj_disp_dt < start_date) |>
+  #restricting to convictions that occurred between 15-60
+  filter((is.na(age_at_date) | (age_at_date >= 15 & age_at_date <= 60))) |>
+  arrange(cjars_id, adj_disp_dt)
+
+#creating a second version of the above dataset, but restricting only to felony convictions for calculating follow-up info:
+crim_hist_fel <- crim_hist_final0 |>
+   group_by(cjars_id) |> 
+    arrange(adj_disp_dt) |> 
+    mutate(prison_spells = cumsum(from_prison),
+      prison_spells_prior = lag(prison_spells, default = 0),
+      inc_time_cum = cumsum(inc_time_months),
+      inc_time_prior = lag(inc_time_cum, default = 0)) |>
+    ungroup() |>
+    filter(n_felony > 0) |>
+    group_by(cjars_id) |>
+    arrange(adj_disp_dt) |>
+    mutate(adj_disp_dt_frac = fractional_year(adj_disp_dt),
+           observed = if_else(adj_disp_dt == max(adj_disp_dt), 0, 1),
+           ytime = lead(adj_disp_dt_frac) - adj_disp_dt_frac
+      ) |>
+    ungroup() |> 
+    mutate(ytime = if_else(is.na(ytime), 
+                           fractional_year(last_observed_date)-adj_disp_dt_frac,
+                           ytime),
+         observed = if_else(died_in_prison > 0, 2, observed)) |>
+    select(-adj_disp_dt_frac) |>
+  filter(adj_disp_dt >= start_date | (!is.na(inc_exit_dt) & inc_exit_dt >= start_date)) |>
+  mutate(conv_pre_start = adj_disp_dt < start_date) |>
+  filter((is.na(age_at_date) | (age_at_date >= 15 & age_at_date <= 60))) |>
+  arrange(cjars_id, adj_disp_dt)
+
+#merging on pre-conviction incarceration info
+crim_hist_final <- left_join(crim_hist_final_all, pre_record3, by = c("cjars_id")) %>%
+  rowwise() %>%
+  mutate(inc_time_prior = sum(inc_time_prior, pre_inc_time, na.rm = TRUE),
+         inc_time_cum = sum(inc_time_cum, pre_inc_time, na.rm = TRUE),
+         prison_spells_prior = sum(prison_spells_prior, pre_spells, na.rm = TRUE),
+         prison_spells = sum(prison_spells, pre_spells, na.rm = TRUE)) %>%
+  select(-pre_inc_time, -pre_spells) %>%
+  ungroup()
+
+save(list = c("crim_hist_final"), file = crim_history_rds)
+
+crim_hist_final_fel <- left_join(crim_hist_fel, pre_record3, by = c("cjars_id")) %>%
+  rowwise() %>%
+  mutate(inc_time_prior = sum(inc_time_prior, pre_inc_time, na.rm = TRUE),
+         inc_time_cum = sum(inc_time_cum, pre_inc_time, na.rm = TRUE),
+         prison_spells_prior = sum(prison_spells_prior, pre_spells, na.rm = TRUE),
+         prison_spells = sum(prison_spells, pre_spells, na.rm = TRUE)) %>%
+  select(-pre_inc_time, -pre_spells) %>%
+  ungroup()
+
+save(list = c("crim_hist_final_fel"), file = crim_history_fel_rds)
+```
+
+Sampling a single record per individual: 
+
+```{r}
+#calculating cumulative time spent free in society:
+time_free_society <- crim_hist_final |>
+  mutate(time_in_society = ytime-(inc_time_months/12)) |>
+  group_by(cjars_id) |>
+  arrange(adj_disp_dt) |>
+  mutate(cumul_time = cumsum(time_in_society),
+         cumul_time_lag = lag(cumul_time),
+         total_time = sum(time_in_society)) |>
+  ungroup() |>
+  replace_na(list(cumul_time_lag = 0)) |>
+  arrange(cjars_id, adj_disp_dt) 
+
+set.seed(123)
+
+#sampling a random time from 0 to total time spent free in society:
+sample_time <- select(time_free_society, cjars_id, total_time) |>
+  distinct() |>
+  group_by(cjars_id) |>
+  mutate(chosen_time = runif(1, min = 0, max = total_time))
+
+#identifying which conviction occurred right after the sampled time:
+selected_inds <- left_join(time_free_society, sample_time, by = "cjars_id") |>
+  mutate(keepme = as.numeric(cumul_time_lag <= chosen_time & cumul_time >= chosen_time))
+
+crim_hist_sample <- selected_inds |>
+  filter(keepme==1) |>
+  select(-cumul_time, -cumul_time_lag, -total_time.x, -total_time.y, -chosen_time, -keepme)
+
+set.seed(365) 
+
+#assigning convictions to training/testing/validation:
+crim_hist_sample$assignment <- sample(c("Training", "Testing", "Validation", "Reserve"), size = nrow(crim_hist_sample), replace = TRUE, prob = c(1/3, 1/6, 1/6, 1/3))
+
+save(list = c("crim_hist_sample"), file = crim_history_sample)
+
+#repeating the sampling process for the dataset that only considers felony convictions:
+time_free_society <- crim_hist_final_fel |>
+  mutate(time_in_society = ytime-(inc_time_months/12)) |>
+  group_by(cjars_id) |>
+  arrange(adj_disp_dt) |>
+  mutate(cumul_time = cumsum(time_in_society),
+         cumul_time_lag = lag(cumul_time),
+         total_time = sum(time_in_society)) |>
+  ungroup() |>
+  replace_na(list(cumul_time_lag = 0)) |>
+  arrange(cjars_id, adj_disp_dt) 
+
+set.seed(256)
+
+sample_time <- select(time_free_society, cjars_id, total_time) |>
+  distinct() |>
+  group_by(cjars_id) |>
+  mutate(chosen_time = runif(1, min = 0, max = total_time))
+
+selected_inds <- left_join(time_free_society, sample_time, by = "cjars_id") |>
+  mutate(keepme = as.numeric(cumul_time_lag <= chosen_time & cumul_time >= chosen_time))
+
+crim_hist_fel_sample <- selected_inds |>
+  filter(keepme==1) |>
+  select(-cumul_time, -cumul_time_lag, -total_time.x, -total_time.y, -chosen_time, -keepme)
+
+set.seed(365) 
+
+crim_hist_fel_sample$assignment <- sample(c("Training", "Testing", "Validation", "Reserve"), size = nrow(crim_hist_fel_sample), replace = TRUE, prob = c(1/3, 1/6, 1/6, 1/3))
+
+save(list = c("crim_hist_fel_sample"), file = crim_history_fel_sample)
+```
+
